@@ -1,0 +1,19 @@
+services:
+  ocr-service:
+    build: .
+    ports:
+      - "18010:8000"
+    environment:
+      OCR_TMP_DIR: /data/tmp
+      OCR_OUT_DIR: /data/out
+      OCR_LANG: spa
+      OCR_MODE: searchable_cpu
+    volumes:
+      - ./data/tmp:/data/tmp
+      - ./data/out:/data/out
+    networks:
+      - grh_network
+
+networks:
+  grh_network:
+    external: true
