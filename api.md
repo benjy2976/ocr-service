@@ -16,7 +16,19 @@ Body (JSON):
 {
   "url": "https://.../archivo.pdf",
   "mode": "searchable_cpu",
-  "lang": "spa"
+  "lang": "spa",
+  "deskew": true,
+  "clean": true,
+  "remove_vectors": false,
+  "psm": "6",
+  "mask_stamps": true,
+  "mask_signatures": true,
+  "stamp_min_area": 20000,
+  "stamp_max_area": 400000,
+  "stamp_circularity": 0.5,
+  "stamp_rect_aspect_min": 0.5,
+  "stamp_rect_aspect_max": 2.0,
+  "signature_region": 0.35
 }
 ```
 
@@ -39,6 +51,8 @@ Respuesta (JSON):
 
 Notas:
 - `download_url` solo aparece si esta definido `PUBLIC_BASE_URL`.
+- Si se usan `mask_stamps` o `mask_signatures`, el OCR se hace sobre una version rasterizada
+  del PDF con sellos/firmas enmascarados.
 
 Ejemplo:
 ```bash
@@ -47,6 +61,25 @@ curl -X POST http://localhost:18010/ocr \
   -d '{"url":"https://.../archivo.pdf","mode":"searchable_cpu","lang":"spa"}'
 ```
 
+## POST /ocr/local
+Procesa un PDF que ya existe en el filesystem del contenedor.
+
+Body (JSON):
+```json
+{
+  "path": "/mnt/storage/regulations/2026/001/documento.pdf",
+  "mode": "searchable_cpu",
+  "lang": "spa",
+  "deskew": true,
+  "clean": true,
+  "remove_vectors": false,
+  "psm": "6"
+}
+```
+
+Notas:
+- Si `OCR_LOCAL_ROOT` esta definido, el path debe estar dentro de ese directorio.
+
 ## POST /ocr/file
 Procesa un PDF enviado directamente.
 
@@ -54,6 +87,18 @@ Parametros:
 - `file` (multipart/form-data): archivo PDF
 - `mode` (opcional): default `searchable_cpu`
 - `lang` (opcional): default `spa`
+- `deskew` (opcional): true/false
+- `clean` (opcional): true/false
+- `remove_vectors` (opcional): true/false
+- `psm` (opcional): ejemplo `6`
+- `mask_stamps` (opcional): true/false
+- `mask_signatures` (opcional): true/false
+- `stamp_min_area` (opcional): numero
+- `stamp_max_area` (opcional): numero
+- `stamp_circularity` (opcional): 0..1
+- `stamp_rect_aspect_min` (opcional): numero
+- `stamp_rect_aspect_max` (opcional): numero
+- `signature_region` (opcional): 0..1
 
 Ejemplo:
 ```bash

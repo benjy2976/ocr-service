@@ -14,6 +14,7 @@ Objetivo: piloto de OCR para PDFs desde URLs, generando:
 - app/          codigo del servicio
 - data/tmp      temporales
 - data/out      salidas (PDF searchable y textos)
+- data/samples  muestras locales para /ocr/local
 - scripts/      utilidades locales
 
 ## Variables de entorno
@@ -21,7 +22,20 @@ Objetivo: piloto de OCR para PDFs desde URLs, generando:
 - OCR_OUT_DIR   (default: /data/out)
 - OCR_LANG      (default: spa)
 - OCR_MODE      (default: searchable_cpu)
+- OCR_DESKEW (default: false)
+- OCR_CLEAN (default: false)
+- OCR_REMOVE_VECTORS (default: false)
+- OCR_TESSERACT_PSM (opcional; ejemplo: 6)
+- OCR_LOCAL_ROOT (opcional; si se define, limita /ocr/local a ese directorio)
 - PUBLIC_BASE_URL (opcional; si se define, se devuelve `download_url` absoluto)
+- OCR_MASK_STAMPS (default: false)
+- OCR_MASK_SIGNATURES (default: false)
+- OCR_STAMP_MIN_AREA (default: 20000)
+- OCR_STAMP_MAX_AREA (default: 400000)
+- OCR_STAMP_CIRCULARITY (default: 0.5)
+- OCR_STAMP_RECT_ASPECT_MIN (default: 0.5)
+- OCR_STAMP_RECT_ASPECT_MAX (default: 2.0)
+- OCR_SIGNATURE_REGION (default: 0.35)
 
 ## Endpoints
 - POST /ocr
@@ -34,6 +48,13 @@ Objetivo: piloto de OCR para PDFs desde URLs, generando:
 
 - GET /file/{filename}
   Descarga el PDF con OCR aplicado.
+
+- POST /ocr/local
+  Procesa un PDF que ya existe en el filesystem del contenedor.
+
+Nota:
+- Si se activan `mask_stamps` o `mask_signatures`, el OCR se hace sobre una version
+  rasterizada con sellos/firmas enmascarados.
 
 ## Como ponerlo en funcionamiento
 

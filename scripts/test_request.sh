@@ -1,8 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-URL="$1"
+TARGET="${1:-}"
+if [[ -z "$TARGET" ]]; then
+  echo "Uso: $0 <url|ruta_pdf>"
+  exit 1
+fi
 
-curl -s -X POST http://localhost:8000/ocr \
-  -H 'Content-Type: application/json' \
-  -d "{\"url\": \"$URL\", \"mode\": \"searchable_cpu\", \"lang\": \"spa\"}" | jq .
+BASE_URL="${BASE_URL:-http://localhost:18010}"
+
+if [[ -f "$TARGET" ]]; then
+  curl -s -X POST "$BASE_URL/ocr/file" \
+    -F "file=@$TARGET" \
+    -F "mode=searchable_cpu" \
+    -F "lang=spa" \
+    -F "deskew=true" \
+    -F "clean=true" \
+    -F "psm=6" | jq .
+else
+  curl -s -X POST "$BASE_URL/ocr" \
+    -H 'Content-Type: application/json' \
+    -d "{\"url\": \"$TARGET\", \"mode\": \"searchable_cpu\", \"lang\": \"spa\", \"deskew\": true, \"clean\": true, \"psm\": \"6\"}" | jq .
+fi
