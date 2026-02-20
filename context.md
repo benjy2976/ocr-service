@@ -15,12 +15,21 @@ prioridad en calidad y resultado profesional, aun si el procesamiento toma tiemp
 
 ## Decision tecnica
 Se adopta OCRmyPDF + Tesseract como pipeline base (CPU).
+Salida final definida como PDF/A-2b con imagen original intacta y capa OCR invisible.
+La version enmascarada (si existe) es solo para mejorar OCR interno y no es salida final.
 
 ### Por que
 - Produce salida profesional con capa OCR invisible y soporte de PDF/A.
 - Preserva el documento original y su estructura.
 - Flujo estable, reproducible y comun en produccion para archivos oficiales.
 - Mejora real de calidad posible via preprocesado (deskew, limpieza, etc.).
+
+### PDF/A elegido
+- Se elige PDF/A-2b (basado en PDF 1.7) porque mantiene preservacion visual y
+  permite caracteristicas modernas (transparencias/capas y mejor compresion),
+  con amplia aceptacion archivistica.
+- PDF/A-1b (PDF 1.4) es mas conservador pero limita transparencias y features
+  modernas; se reserva solo si un organismo exige esa compatibilidad.
 
 ## GPU
 No se usara GPU como base del pipeline.

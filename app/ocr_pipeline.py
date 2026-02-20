@@ -26,6 +26,19 @@ DEFAULT_STAMP_CIRCULARITY = float(os.getenv("OCR_STAMP_CIRCULARITY", "0.5"))
 DEFAULT_STAMP_RECT_ASPECT_MIN = float(os.getenv("OCR_STAMP_RECT_ASPECT_MIN", "0.5"))
 DEFAULT_STAMP_RECT_ASPECT_MAX = float(os.getenv("OCR_STAMP_RECT_ASPECT_MAX", "2.0"))
 DEFAULT_SIGNATURE_REGION = float(os.getenv("OCR_SIGNATURE_REGION", "0.35"))
+DEFAULT_MASK_DILATE = int(os.getenv("OCR_MASK_DILATE", "4"))
+DEFAULT_MASK_GRAYSCALE = os.getenv("OCR_MASK_GRAYSCALE", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+_OCR_JOBS_RAW = os.getenv("OCR_JOBS", "").strip()
+DEFAULT_OCR_JOBS = None
+if _OCR_JOBS_RAW:
+    try:
+        DEFAULT_OCR_JOBS = max(1, int(_OCR_JOBS_RAW))
+    except ValueError:
+        DEFAULT_OCR_JOBS = None
 
 
 def _safe_filename_from_url(url: str) -> str:
@@ -81,6 +94,7 @@ def _mask_stamps_and_signatures(
     stamp_rect_aspect_min: float,
     stamp_rect_aspect_max: float,
     signature_region: float,
+    mask_dilate: int,
 ) -> np.ndarray:
     h, w = image_bgr.shape[:2]
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
@@ -122,6 +136,11 @@ def _mask_stamps_and_signatures(
             if bw > w * 0.2 and bh < h * 0.08:
                 cv2.drawContours(mask, [cnt], -1, 255, thickness=cv2.FILLED, offset=(0, start_y))
 
+    if mask_dilate and mask.sum() > 0:
+        k = max(1, int(mask_dilate))
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+        mask = cv2.dilate(mask, kernel, iterations=1)
+
     if mask.sum() == 0:
         return image_bgr
 
@@ -132,6 +151,7 @@ def _mask_stamps_and_signatures(
 
 def _prepare_masked_pdf(
     input_pdf: Path,
+    output_pdf: Path,
     *,
     mask_stamps: bool,
     mask_signatures: bool,
@@ -141,6 +161,8 @@ def _prepare_masked_pdf(
     stamp_rect_aspect_min: float,
     stamp_rect_aspect_max: float,
     signature_region: float,
+    grayscale: bool,
+    mask_dilate: int,
 ) -> Path:
     doc = fitz.open(input_pdf)
     out_doc = fitz.open()
@@ -149,6 +171,9 @@ def _prepare_masked_pdf(
         mat = fitz.Matrix(300 / 72, 300 / 72)
         pix = page.get_pixmap(matrix=mat, alpha=False)
         img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, 3)
+        if grayscale:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
         img = _mask_stamps_and_signatures(
             img,
             mask_stamps=mask_stamps,
@@ -159,6 +184,7 @@ def _prepare_masked_pdf(
             stamp_rect_aspect_min=stamp_rect_aspect_min,
             stamp_rect_aspect_max=stamp_rect_aspect_max,
             signature_region=signature_region,
+            mask_dilate=mask_dilate,
         )
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img_bytes = cv2.imencode(".png", img_rgb)[1].tobytes()
@@ -166,15 +192,11 @@ def _prepare_masked_pdf(
         new_page = out_doc.new_page(width=page.rect.width, height=page.rect.height)
         new_page.insert_image(rect, stream=img_bytes)
 
-    tmp_dir = Path(DEFAULT_TMP_DIR)
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    fd, path = tempfile.mkstemp(prefix="masked_", suffix=".pdf", dir=str(tmp_dir))
-    os.close(fd)
-    out_path = Path(path)
-    out_doc.save(out_path)
+    output_pdf.parent.mkdir(parents=True, exist_ok=True)
+    out_doc.save(output_pdf)
     out_doc.close()
     doc.close()
-    return out_path
+    return output_pdf
 
 
 def _ocr_searchable_cpu(
@@ -186,6 +208,7 @@ def _ocr_searchable_cpu(
     clean: bool,
     remove_vectors: bool,
     psm: str | None,
+    jobs: int | None,
 ) -> None:
     # OCRmyPDF uses Tesseract under the hood (CPU). We keep optimize=0 to avoid recompression.
     cmd = [
@@ -194,6 +217,8 @@ def _ocr_searchable_cpu(
         "--optimize", "0",
         "-l", lang,
     ]
+    if jobs:
+        cmd.extend(["--jobs", str(jobs)])
     if deskew:
         cmd.append("--deskew")
     if clean:
@@ -222,8 +247,11 @@ def run_ocr(
     clean: bool | None = None,
     remove_vectors: bool | None = None,
     psm: str | None = None,
+    jobs: int | None = None,
     mask_stamps: bool | None = None,
     mask_signatures: bool | None = None,
+    mask_grayscale: bool | None = None,
+    mask_dilate: int | None = None,
     stamp_min_area: float | None = None,
     stamp_max_area: float | None = None,
     stamp_circularity: float | None = None,
@@ -237,8 +265,11 @@ def run_ocr(
     clean = DEFAULT_CLEAN if clean is None else clean
     remove_vectors = DEFAULT_REMOVE_VECTORS if remove_vectors is None else remove_vectors
     psm = DEFAULT_PSM if psm is None else psm
+    jobs = DEFAULT_OCR_JOBS if jobs is None else jobs
     mask_stamps = DEFAULT_MASK_STAMPS if mask_stamps is None else mask_stamps
     mask_signatures = DEFAULT_MASK_SIGNATURES if mask_signatures is None else mask_signatures
+    mask_grayscale = DEFAULT_MASK_GRAYSCALE if mask_grayscale is None else mask_grayscale
+    mask_dilate = DEFAULT_MASK_DILATE if mask_dilate is None else mask_dilate
     stamp_min_area = DEFAULT_STAMP_MIN_AREA if stamp_min_area is None else stamp_min_area
     stamp_max_area = DEFAULT_STAMP_MAX_AREA if stamp_max_area is None else stamp_max_area
     stamp_circularity = (
@@ -258,7 +289,9 @@ def run_ocr(
         DEFAULT_SIGNATURE_REGION if signature_region is None else signature_region
     )
 
+    tmp_dir = Path(DEFAULT_TMP_DIR)
     out_dir = Path(DEFAULT_OUT_DIR)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     token = uuid.uuid4().hex[:12]
@@ -276,10 +309,13 @@ def run_ocr(
 
     if mode == "searchable_cpu":
         out_pdf = out_dir / f"{token}_searchable.pdf"
-        ocr_input = src_pdf
+        masked_pdf = None
+        masked_searchable_pdf = None
         if mask_stamps or mask_signatures:
-            ocr_input = _prepare_masked_pdf(
+            masked_pdf = out_dir / f"{token}_masked.pdf"
+            _prepare_masked_pdf(
                 src_pdf,
+                masked_pdf,
                 mask_stamps=mask_stamps,
                 mask_signatures=mask_signatures,
                 stamp_min_area=stamp_min_area,
@@ -288,15 +324,29 @@ def run_ocr(
                 stamp_rect_aspect_min=stamp_rect_aspect_min,
                 stamp_rect_aspect_max=stamp_rect_aspect_max,
                 signature_region=signature_region,
+                grayscale=mask_grayscale,
+                mask_dilate=mask_dilate,
+            )
+            masked_searchable_pdf = out_dir / f"{token}_masked_searchable.pdf"
+            _ocr_searchable_cpu(
+                masked_pdf,
+                masked_searchable_pdf,
+                lang,
+                deskew=deskew,
+                clean=clean,
+                remove_vectors=remove_vectors,
+                psm=psm,
+                jobs=jobs,
             )
         _ocr_searchable_cpu(
-            ocr_input,
+            src_pdf,
             out_pdf,
             lang,
             deskew=deskew,
             clean=clean,
             remove_vectors=remove_vectors,
             psm=psm,
+            jobs=jobs,
         )
         text = _extract_text(out_pdf)
     else:
@@ -309,6 +359,8 @@ def run_ocr(
         "lang": lang,
         "source": str(src_pdf),
         "output_pdf": str(out_pdf),
+        "masked_pdf": str(masked_pdf) if masked_pdf else None,
+        "masked_output_pdf": str(masked_searchable_pdf) if masked_searchable_pdf else None,
         "content_type": content_type,
         "source_bytes": size,
         "text_len": len(text),
@@ -325,8 +377,11 @@ def run_ocr_file(
     clean: bool | None = None,
     remove_vectors: bool | None = None,
     psm: str | None = None,
+    jobs: int | None = None,
     mask_stamps: bool | None = None,
     mask_signatures: bool | None = None,
+    mask_grayscale: bool | None = None,
+    mask_dilate: int | None = None,
     stamp_min_area: float | None = None,
     stamp_max_area: float | None = None,
     stamp_circularity: float | None = None,
@@ -340,8 +395,11 @@ def run_ocr_file(
     clean = DEFAULT_CLEAN if clean is None else clean
     remove_vectors = DEFAULT_REMOVE_VECTORS if remove_vectors is None else remove_vectors
     psm = DEFAULT_PSM if psm is None else psm
+    jobs = DEFAULT_OCR_JOBS if jobs is None else jobs
     mask_stamps = DEFAULT_MASK_STAMPS if mask_stamps is None else mask_stamps
     mask_signatures = DEFAULT_MASK_SIGNATURES if mask_signatures is None else mask_signatures
+    mask_grayscale = DEFAULT_MASK_GRAYSCALE if mask_grayscale is None else mask_grayscale
+    mask_dilate = DEFAULT_MASK_DILATE if mask_dilate is None else mask_dilate
     stamp_min_area = DEFAULT_STAMP_MIN_AREA if stamp_min_area is None else stamp_min_area
     stamp_max_area = DEFAULT_STAMP_MAX_AREA if stamp_max_area is None else stamp_max_area
     stamp_circularity = (
@@ -380,10 +438,13 @@ def run_ocr_file(
 
     if mode == "searchable_cpu":
         out_pdf = out_dir / f"{token}_searchable.pdf"
-        ocr_input = src_pdf
+        masked_pdf = None
+        masked_searchable_pdf = None
         if mask_stamps or mask_signatures:
-            ocr_input = _prepare_masked_pdf(
+            masked_pdf = out_dir / f"{token}_masked.pdf"
+            _prepare_masked_pdf(
                 src_pdf,
+                masked_pdf,
                 mask_stamps=mask_stamps,
                 mask_signatures=mask_signatures,
                 stamp_min_area=stamp_min_area,
@@ -392,15 +453,29 @@ def run_ocr_file(
                 stamp_rect_aspect_min=stamp_rect_aspect_min,
                 stamp_rect_aspect_max=stamp_rect_aspect_max,
                 signature_region=signature_region,
+                grayscale=mask_grayscale,
+                mask_dilate=mask_dilate,
+            )
+            masked_searchable_pdf = out_dir / f"{token}_masked_searchable.pdf"
+            _ocr_searchable_cpu(
+                masked_pdf,
+                masked_searchable_pdf,
+                lang,
+                deskew=deskew,
+                clean=clean,
+                remove_vectors=remove_vectors,
+                psm=psm,
+                jobs=jobs,
             )
         _ocr_searchable_cpu(
-            ocr_input,
+            src_pdf,
             out_pdf,
             lang,
             deskew=deskew,
             clean=clean,
             remove_vectors=remove_vectors,
             psm=psm,
+            jobs=jobs,
         )
         text = _extract_text(out_pdf)
     else:
@@ -413,6 +488,8 @@ def run_ocr_file(
         "lang": lang,
         "source": str(src_pdf),
         "output_pdf": str(out_pdf),
+        "masked_pdf": str(masked_pdf) if masked_pdf else None,
+        "masked_output_pdf": str(masked_searchable_pdf) if masked_searchable_pdf else None,
         "content_type": content_type,
         "source_bytes": size,
         "text_len": len(text),

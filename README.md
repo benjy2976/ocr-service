@@ -26,6 +26,7 @@ Objetivo: piloto de OCR para PDFs desde URLs, generando:
 - OCR_CLEAN (default: false)
 - OCR_REMOVE_VECTORS (default: false)
 - OCR_TESSERACT_PSM (opcional; ejemplo: 6)
+- OCR_JOBS (opcional; numero de procesos para OCRmyPDF/Tesseract)
 - OCR_LOCAL_ROOT (opcional; si se define, limita /ocr/local a ese directorio)
 - PUBLIC_BASE_URL (opcional; si se define, se devuelve `download_url` absoluto)
 - OCR_MASK_STAMPS (default: false)
@@ -36,6 +37,8 @@ Objetivo: piloto de OCR para PDFs desde URLs, generando:
 - OCR_STAMP_RECT_ASPECT_MIN (default: 0.5)
 - OCR_STAMP_RECT_ASPECT_MAX (default: 2.0)
 - OCR_SIGNATURE_REGION (default: 0.35)
+- OCR_MASK_GRAYSCALE (default: true; convierte a grises el PDF enmascarado)
+- OCR_MASK_DILATE (default: 4; expande la mascara para cubrir mejor el sello)
 
 ## Endpoints
 - POST /ocr
