@@ -3,15 +3,23 @@ services:
     build: .
     ports:
       - "18010:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
     environment:
       OCR_TMP_DIR: /data/tmp
       OCR_OUT_DIR: /data/out
       OCR_LANG: spa
       OCR_MODE: searchable_cpu
+      STAMP_MODEL_PATH: /data/models/stamp_detector.pt
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
     volumes:
-      - ./data/tmp:/data/tmp
-      - ./data/out:/data/out
-      - ./data/samples:/data/samples:ro
+      - ./data:/data
+      - ./app:/app/app
+      - ./scripts:/app/scripts:ro
     networks:
       - grh_network
 

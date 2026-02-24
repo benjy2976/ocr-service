@@ -16,6 +16,7 @@ COPY requirements.txt /app/requirements.txt
 RUN python3 -m pip install --no-cache-dir -r /app/requirements.txt
 
 COPY app /app/app
+COPY scripts /app/scripts
 
 ENV OCR_TMP_DIR=/data/tmp \
     OCR_OUT_DIR=/data/out \

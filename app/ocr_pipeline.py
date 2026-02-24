@@ -32,6 +32,18 @@ DEFAULT_MASK_GRAYSCALE = os.getenv("OCR_MASK_GRAYSCALE", "true").lower() in (
     "true",
     "yes",
 )
+DEFAULT_STAMP_MODEL_PATH = os.getenv(
+    "STAMP_MODEL_PATH",
+    "/data/models/stamp_detector.pt",
+)
+DEFAULT_STAMP_TEST_PDF = os.getenv(
+    "STAMP_TEST_PDF",
+    "/data/samples/100/00000010000432026_1771454832.pdf",
+)
+DEFAULT_STAMP_TEST_DPI = int(os.getenv("STAMP_TEST_DPI", "200"))
+DEFAULT_STAMP_TEST_CONF = float(os.getenv("STAMP_TEST_CONF", "0.25"))
+DEFAULT_STAMP_TEST_IMGSZ = int(os.getenv("STAMP_TEST_IMGSZ", "640"))
+DEFAULT_STAMP_DEVICE = os.getenv("STAMP_DEVICE", "auto")
 _OCR_JOBS_RAW = os.getenv("OCR_JOBS", "").strip()
 DEFAULT_OCR_JOBS = None
 if _OCR_JOBS_RAW:
@@ -494,4 +506,71 @@ def run_ocr_file(
         "source_bytes": size,
         "text_len": len(text),
         "elapsed_sec": round(elapsed, 2),
+    }
+
+
+def run_stamp_test() -> dict:
+    pdf_path = Path(DEFAULT_STAMP_TEST_PDF)
+    if not pdf_path.exists():
+        raise RuntimeError(f"STAMP_TEST_PDF not found: {pdf_path}")
+
+    model_path = Path(DEFAULT_STAMP_MODEL_PATH)
+    if not model_path.exists():
+        raise RuntimeError(f"STAMP_MODEL_PATH not found: {model_path}")
+
+    out_dir = Path(DEFAULT_OUT_DIR) / "stamp_test"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    token = uuid.uuid4().hex[:12]
+    img_path = out_dir / f"{token}_p1.png"
+
+    doc = fitz.open(pdf_path)
+    try:
+        page = doc.load_page(0)
+        mat = fitz.Matrix(DEFAULT_STAMP_TEST_DPI / 72, DEFAULT_STAMP_TEST_DPI / 72)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        pix.save(img_path.as_posix())
+    finally:
+        doc.close()
+
+    try:
+        from ultralytics import YOLO
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError("Ultralytics is not installed in the service") from exc
+
+    model = YOLO(str(model_path))
+    device = DEFAULT_STAMP_DEVICE
+    if device == "auto":
+        try:
+            import torch
+            device = "0" if torch.cuda.is_available() else "cpu"
+        except Exception:
+            device = "cpu"
+    predict_dir = out_dir / "predict"
+    model.predict(
+        source=str(img_path),
+        imgsz=DEFAULT_STAMP_TEST_IMGSZ,
+        conf=DEFAULT_STAMP_TEST_CONF,
+        device=device,
+        save=True,
+        verbose=False,
+        project=str(predict_dir),
+        name=token,
+        exist_ok=True,
+    )
+
+    pred_dir = predict_dir / token
+    output_image = None
+    for ext in (".jpg", ".png"):
+        matches = list(pred_dir.glob(f"*{ext}"))
+        if matches:
+            output_image = matches[0]
+            break
+    if output_image is None:
+        raise RuntimeError(f"Prediction image not found in {pred_dir}")
+
+    return {
+        "source_pdf": str(pdf_path),
+        "source_image": str(img_path),
+        "output_image": str(output_image),
     }

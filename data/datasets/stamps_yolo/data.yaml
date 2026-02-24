@@ -1,5 +1,5 @@
-path: /home/administrador/ocr/data/datasets/stamps_yolo
+path: /data/datasets/stamps_yolo
 train: images/train
-val: images/train
+val: images/val
 nc: 1
 names: ['stamp']
