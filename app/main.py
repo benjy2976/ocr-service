@@ -6,6 +6,8 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, HttpUrl
 from app.ocr_pipeline import DEFAULT_OUT_DIR, run_ocr, run_ocr_file, run_stamp_test
+import json
+import time
 
 app = FastAPI(title="OCR Pilot Service", version="0.1.0")
 
@@ -262,6 +264,62 @@ def download_image(filename: str):
     return FileResponse(path=str(file_path), media_type=media_type, filename=filename)
 
 
+def _review_state_path() -> Path:
+    return Path(DEFAULT_OUT_DIR) / "stamp_pages" / "state.json"
+
+
+def _review_lock_ttl_sec() -> int:
+    raw = os.getenv("REVIEW_LOCK_TTL_MIN", "30")
+    try:
+        return max(1, int(raw)) * 60
+    except ValueError:
+        return 1800
+
+
+def _load_review_state() -> dict:
+    path = _review_state_path()
+    if not path.exists():
+        return {"items": {}}
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return {"items": {}}
+
+
+def _save_review_state(state: dict) -> None:
+    path = _review_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+    tmp.replace(path)
+
+
+def _normalize_state(state: dict) -> dict:
+    ttl = _review_lock_ttl_sec()
+    now = time.time()
+    items = state.get("items", {})
+    for name, info in items.items():
+        if info.get("status") == "in_process":
+            locked_at = info.get("locked_at", 0)
+            if now - locked_at > ttl:
+                info["status"] = "pending"
+                info["user"] = ""
+                info["locked_at"] = 0
+    state["items"] = items
+    return state
+
+
+def _list_review_images() -> list[str]:
+    images_dir = Path(DEFAULT_OUT_DIR) / "stamp_pages" / "images"
+    if not images_dir.exists():
+        return []
+    return [
+        p.name
+        for p in sorted(images_dir.iterdir())
+        if p.suffix.lower() in (".png", ".jpg", ".jpeg")
+    ]
+
+
 @app.get("/stamps/review", response_class=HTMLResponse)
 def stamps_review():
     html = """
@@ -293,18 +351,17 @@ def stamps_review():
     <div class="layout">
       <div class="sidebar">
         <h3>Revision de sellos</h3>
-        <div class="row">
-          <button class="btn" id="prevBtn">Anterior</button>
-          <button class="btn" id="nextBtn">Siguiente</button>
-        </div>
+        <div class="row"></div>
         <div class="row">
           <button class="btn" id="zoomOutBtn">Zoom -</button>
           <button class="btn" id="zoomInBtn">Zoom +</button>
         </div>
-        <button class="btn" id="saveBtn">Guardar</button>
+        <button class="btn" id="validateBtn">Validar</button>
         <button class="btn" id="addBtn">Agregar sello</button>
         <button class="btn" id="cancelBtn">Cancelar agregar</button>
         <div class="meta" id="meta"></div>
+        <div class="meta" id="userMeta"></div>
+        <button class="btn" id="changeUserBtn">Cambiar usuario</button>
         <div class="list" id="boxList"></div>
         <p class="meta">Usa la lista para activar/desactivar cajas.</p>
         <p class="meta">Para agregar: click en “Agregar sello” y luego 2 clicks en la imagen.</p>
@@ -317,18 +374,19 @@ def stamps_review():
       const canvas = document.getElementById('canvas');
       const ctx = canvas.getContext('2d');
       const meta = document.getElementById('meta');
-      const prevBtn = document.getElementById('prevBtn');
-      const nextBtn = document.getElementById('nextBtn');
-      const saveBtn = document.getElementById('saveBtn');
+      const validateBtn = document.getElementById('validateBtn');
       const addBtn = document.getElementById('addBtn');
       const cancelBtn = document.getElementById('cancelBtn');
       const boxList = document.getElementById('boxList');
       const zoomOutBtn = document.getElementById('zoomOutBtn');
       const zoomInBtn = document.getElementById('zoomInBtn');
+      const userMeta = document.getElementById('userMeta');
+      const changeUserBtn = document.getElementById('changeUserBtn');
 
       let SCALE = 0.5;
       let items = [];
       let idx = 0;
+      let currentName = '';
       let image = new Image();
       let boxes = [];
       let removed = new Set();
@@ -379,7 +437,8 @@ def stamps_review():
         if (!items.length) return;
         removed = new Set();
         const item = items[idx];
-        meta.textContent = `(${idx + 1}/${items.length}) ${item.name}`;
+        currentName = item.name;
+        meta.textContent = item.name ? item.name : '';
         image.onload = draw;
         image.src = `/image/${encodeURIComponent(item.name)}`;
         fetch(`/stamps/review/labels?name=${encodeURIComponent(item.name)}`)
@@ -389,9 +448,7 @@ def stamps_review():
       }
 
       function updateControls() {
-        prevBtn.disabled = addMode || idx === 0;
-        nextBtn.disabled = addMode || idx === items.length - 1;
-        saveBtn.disabled = addMode;
+        validateBtn.disabled = addMode;
         cancelBtn.disabled = !addMode;
         addBtn.classList.toggle('active', addMode);
       }
@@ -554,16 +611,6 @@ def stamps_review():
         });
       }
 
-      saveBtn.addEventListener('click', () => {
-        saveCurrent().then(() => alert('Guardado'));
-      });
-
-      prevBtn.addEventListener('click', () => { if (idx > 0) { idx--; loadItem(); } });
-      nextBtn.addEventListener('click', () => {
-        if (idx < items.length - 1) {
-          saveCurrent().then(() => { idx++; loadItem(); });
-        }
-      });
       addBtn.addEventListener('click', () => {
         addMode = true;
         addPoints = [];
@@ -576,6 +623,13 @@ def stamps_review():
         updateControls();
       });
 
+      validateBtn.addEventListener('click', () => {
+        saveCurrent().then(() => {
+          fetch(`/stamps/review/validate?name=${encodeURIComponent(currentName)}&user=${encodeURIComponent(userName)}`, { method: 'POST' })
+            .then(() => fetchNext());
+        });
+      });
+
       zoomInBtn.addEventListener('click', () => {
         SCALE = Math.min(2.0, SCALE + 0.1);
         draw();
@@ -585,9 +639,31 @@ def stamps_review():
         draw();
       });
 
-      fetch('/stamps/review/items')
-        .then(r => r.json())
-        .then(data => { items = data.items; loadItem(); });
+      let userName = localStorage.getItem('review_user');
+      if (!userName) {
+        userName = prompt('Usuario para revision:') || 'anon';
+        localStorage.setItem('review_user', userName);
+      }
+      userMeta.textContent = `Usuario: ${userName}`;
+
+      changeUserBtn.addEventListener('click', () => {
+        const next = prompt('Usuario para revision:', userName);
+        if (next) {
+          userName = next;
+          localStorage.setItem('review_user', userName);
+          userMeta.textContent = `Usuario: ${userName}`;
+          fetchNext();
+        }
+      });
+
+      function fetchNext() {
+        fetch(`/stamps/review/next?user=${encodeURIComponent(userName)}`)
+          .then(r => r.json())
+          .then(data => { items = [{ name: data.name }]; idx = 0; loadItem(); })
+          .catch(() => { items = []; meta.textContent = 'Sin pendientes'; draw(); });
+      }
+
+      fetchNext();
     </script>
   </body>
 </html>
@@ -606,6 +682,61 @@ def stamps_review_items():
         if p.suffix.lower() in (".png", ".jpg", ".jpeg")
     ]
     return {"items": items}
+
+
+@app.get("/stamps/review/next")
+def stamps_review_next(user: str):
+    if not user:
+        raise HTTPException(status_code=400, detail="user required")
+    state = _normalize_state(_load_review_state())
+    items_state = state.get("items", {})
+    images = _list_review_images()
+    for name in images:
+        info = items_state.get(name, {"status": "pending"})
+        if info.get("status") == "pending":
+            items_state[name] = {
+                "status": "in_process",
+                "user": user,
+                "locked_at": time.time(),
+            }
+            state["items"] = items_state
+            _save_review_state(state)
+            return {"name": name}
+    raise HTTPException(status_code=404, detail="no pending items")
+
+
+@app.post("/stamps/review/validate")
+def stamps_review_validate(name: str, user: str):
+    state = _normalize_state(_load_review_state())
+    items_state = state.get("items", {})
+    info = items_state.get(name, {"status": "pending"})
+    if info.get("status") == "in_process" and info.get("user") != user:
+        raise HTTPException(status_code=409, detail="locked by another user")
+    items_state[name] = {
+        "status": "validated",
+        "user": user,
+        "locked_at": 0,
+        "validated_at": time.time(),
+    }
+    state["items"] = items_state
+    _save_review_state(state)
+    return {"ok": True}
+
+
+@app.post("/stamps/review/release")
+def stamps_review_release(name: str, user: str):
+    state = _normalize_state(_load_review_state())
+    items_state = state.get("items", {})
+    info = items_state.get(name, {"status": "pending"})
+    if info.get("status") == "in_process" and info.get("user") == user:
+        items_state[name] = {
+            "status": "pending",
+            "user": "",
+            "locked_at": 0,
+        }
+        state["items"] = items_state
+        _save_review_state(state)
+    return {"ok": True}
 
 
 @app.get("/stamps/review/labels")
