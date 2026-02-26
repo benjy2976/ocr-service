@@ -320,8 +320,29 @@ def _list_review_images() -> list[str]:
     ]
 
 
+_review_total_cache: int | None = None
+
+
+def _review_total_pages() -> int:
+    global _review_total_cache
+    if _review_total_cache is not None:
+        return _review_total_cache
+    pages_csv = Path(DEFAULT_OUT_DIR) / "stamp_pages" / "pages.csv"
+    if not pages_csv.exists():
+        _review_total_cache = 0
+        return _review_total_cache
+    try:
+        with pages_csv.open("r", encoding="utf-8") as f:
+            total = sum(1 for _ in f) - 1
+    except OSError:
+        total = 0
+    _review_total_cache = max(total, 0)
+    return _review_total_cache
+
+
 @app.get("/stamps/review", response_class=HTMLResponse)
 def stamps_review():
+    review_version = os.getenv("REVIEW_APP_VERSION", "0")
     html = """
 <!doctype html>
 <html lang="es">
@@ -365,12 +386,15 @@ def stamps_review():
         <div class="list" id="boxList"></div>
         <p class="meta">Usa la lista para activar/desactivar cajas.</p>
         <p class="meta">Para agregar: click en “Agregar sello” y luego 2 clicks en la imagen.</p>
+        <p class="meta" id="statsMeta"></p>
+        <div class="meta" id="userStats"></div>
       </div>
       <div class="content">
         <canvas id="canvas"></canvas>
       </div>
     </div>
     <script>
+      const REVIEW_VERSION = "__REVIEW_VERSION__";
       const canvas = document.getElementById('canvas');
       const ctx = canvas.getContext('2d');
       const meta = document.getElementById('meta');
@@ -382,11 +406,14 @@ def stamps_review():
       const zoomInBtn = document.getElementById('zoomInBtn');
       const userMeta = document.getElementById('userMeta');
       const changeUserBtn = document.getElementById('changeUserBtn');
+      const statsMeta = document.getElementById('statsMeta');
+      const userStats = document.getElementById('userStats');
 
       let SCALE = 0.5;
       let items = [];
       let idx = 0;
       let currentName = '';
+      let totalPages = 0;
       let image = new Image();
       let boxes = [];
       let removed = new Set();
@@ -451,6 +478,38 @@ def stamps_review():
         validateBtn.disabled = addMode;
         cancelBtn.disabled = !addMode;
         addBtn.classList.toggle('active', addMode);
+      }
+
+      function refreshStats() {
+        fetch('/stamps/review/stats')
+          .then(r => r.json())
+          .then(data => {
+            statsMeta.textContent = `Validadas: ${data.validated} / Total: ${totalPages}`;
+            userStats.innerHTML = '';
+            if (data.users && data.users.length) {
+              const title = document.createElement('div');
+              title.textContent = 'Usuarios:';
+              userStats.appendChild(title);
+              data.users.forEach((u) => {
+                const row = document.createElement('div');
+                row.textContent = `${u.user}: ${u.count}`;
+                userStats.appendChild(row);
+              });
+            }
+          });
+      }
+
+      function checkVersionAndReload() {
+        return fetch('/stamps/review/version')
+          .then(r => r.json())
+          .then(data => {
+            if (data.version && data.version !== REVIEW_VERSION) {
+              location.reload();
+              return true;
+            }
+            return false;
+          })
+          .catch(() => false);
       }
 
       function renderList() {
@@ -626,7 +685,11 @@ def stamps_review():
       validateBtn.addEventListener('click', () => {
         saveCurrent().then(() => {
           fetch(`/stamps/review/validate?name=${encodeURIComponent(currentName)}&user=${encodeURIComponent(userName)}`, { method: 'POST' })
-            .then(() => fetchNext());
+            .then(() => {
+              fetchNext();
+              refreshStats();
+              checkVersionAndReload();
+            });
         });
       });
 
@@ -653,6 +716,7 @@ def stamps_review():
           localStorage.setItem('review_user', userName);
           userMeta.textContent = `Usuario: ${userName}`;
           fetchNext();
+          refreshStats();
         }
       });
 
@@ -660,15 +724,23 @@ def stamps_review():
         fetch(`/stamps/review/next?user=${encodeURIComponent(userName)}`)
           .then(r => r.json())
           .then(data => { items = [{ name: data.name }]; idx = 0; loadItem(); })
+          .then(() => checkVersionAndReload())
           .catch(() => { items = []; meta.textContent = 'Sin pendientes'; draw(); });
       }
+
+      fetch('/stamps/review/total')
+        .then(r => r.json())
+        .then(data => {
+          totalPages = data.total || 0;
+          refreshStats();
+        });
 
       fetchNext();
     </script>
   </body>
 </html>
 """
-    return HTMLResponse(content=html)
+    return HTMLResponse(content=html.replace("__REVIEW_VERSION__", review_version))
 
 
 @app.get("/stamps/review/items")
@@ -703,6 +775,34 @@ def stamps_review_next(user: str):
             _save_review_state(state)
             return {"name": name}
     raise HTTPException(status_code=404, detail="no pending items")
+
+
+@app.get("/stamps/review/total")
+def stamps_review_total():
+    return {"total": _review_total_pages()}
+
+
+@app.get("/stamps/review/version")
+def stamps_review_version():
+    return {"version": os.getenv("REVIEW_APP_VERSION", "0")}
+
+
+@app.get("/stamps/review/stats")
+def stamps_review_stats():
+    state = _normalize_state(_load_review_state())
+    items = state.get("items", {})
+    validated = 0
+    per_user: dict[str, int] = {}
+    for meta in items.values():
+        if meta.get("validated_at"):
+            validated += 1
+            user = meta.get("user") or "anon"
+            per_user[user] = per_user.get(user, 0) + 1
+    users = [
+        {"user": u, "count": c}
+        for u, c in sorted(per_user.items(), key=lambda item: item[1], reverse=True)
+    ]
+    return {"validated": validated, "users": users}
 
 
 @app.post("/stamps/review/validate")

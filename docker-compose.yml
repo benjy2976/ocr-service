@@ -13,6 +13,7 @@ services:
       OCR_OUT_DIR: /data/out
       OCR_LANG: spa
       OCR_MODE: searchable_cpu
+      REVIEW_APP_VERSION: "1"
       STAMP_MODEL_PATH: /data/models/stamp_detector.pt
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
