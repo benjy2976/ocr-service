@@ -1,14 +1,23 @@
-# OCR Service (Pilot)
+# OCR Service
 
-Objetivo: piloto de OCR para PDFs desde URLs, generando:
-- PDF searchable
-- Texto extraido
-- Metricas basicas
+Objetivo actual:
+- generar un `PDF searchable` con la imagen original intacta
+- usar OCR principalmente para busqueda documental
+- controlar mejor el texto falso introducido por sellos, logos, firmas y huellas
+
+Estado del proyecto:
+- servicio OCR funcional
+- pipeline conservador en evolucion
+- detector de sellos integrado
+- linea paralela de deteccion de texto ya iniciada
 
 ## Enfoque
-- OCR CPU: OCRmyPDF + Tesseract (estable, calidad consistente)
-- Extraccion de texto: PyMuPDF
+- OCR oficial: OCRmyPDF + Tesseract
+- Salida final: PDF searchable con imagen original intacta
 - Servicio: FastAPI
+- Vision auxiliar:
+  - detector de sellos / logos / firmas
+  - preanotacion y futura deteccion de bloques de texto
 
 ## Estructura
 - app/          codigo del servicio
@@ -16,6 +25,10 @@ Objetivo: piloto de OCR para PDFs desde URLs, generando:
 - data/out      salidas (PDF searchable y textos)
 - data/samples  muestras locales para /ocr/local
 - scripts/      utilidades locales
+
+Workspaces relevantes:
+- `data/out/stamp_pages` paginas usadas para sellos
+- `data/out/text_pages` copia separada para trabajar cajas de texto
 
 ## Variables de entorno
 - OCR_TMP_DIR   (default: /data/tmp)
@@ -39,6 +52,7 @@ Objetivo: piloto de OCR para PDFs desde URLs, generando:
 - OCR_SIGNATURE_REGION (default: 0.35)
 - OCR_MASK_GRAYSCALE (default: true; convierte a grises el PDF enmascarado)
 - OCR_MASK_DILATE (default: 4; expande la mascara para cubrir mejor el sello)
+- STAMP_MODEL_PATH (default efectivo: `stamp_detector_v2.pt` si existe)
 
 ## Endpoints
 - POST /ocr
@@ -58,6 +72,11 @@ Objetivo: piloto de OCR para PDFs desde URLs, generando:
 Nota:
 - Si se activan `mask_stamps` o `mask_signatures`, el OCR se hace sobre una version
   rasterizada con sellos/firmas enmascarados.
+
+Modo adicional:
+- `searchable_conservative`
+  - intenta filtrar mejor la capa OCR en regiones detectadas como sello
+  - es un modo experimental de trabajo, no una solucion cerrada
 
 ## Como ponerlo en funcionamiento
 
@@ -101,6 +120,12 @@ curl -X POST http://localhost:18010/ocr \
 
 Luego descarga el PDF usando `download_path` o `download_url` (si `PUBLIC_BASE_URL` esta definido).
 
+### Interfaces de revision
+- `http://localhost:18010/stamps/review`
+- `http://localhost:18010/stamps/classify`
+- `http://localhost:18010/text/review`
+- `http://localhost:18010/text/review/skipped`
+
 ### Desde otro contenedor en la misma red Docker
 Usa el nombre del servicio y el puerto interno:
 
@@ -110,7 +135,8 @@ curl -X POST http://ocr-service:8000/ocr \
   -d '{"url":"https://.../archivo.pdf","mode":"searchable_cpu","lang":"spa"}'
 ```
 
-## Proximos pasos
-- Agregar pipeline GPU (PaddleOCR) para texto
-- Agregar creacion de PDF searchable con capa OCR GPU
-- Conectar con Laravel/Django via HTTP o cola
+## Lineas de trabajo activas
+- mejorar el recorte de capa OCR en zonas de sello
+- corregir manualmente cajas de `text_block`
+- entrenar un primer detector de texto
+- usar detector de texto + detector de sellos para decidir superposicion real

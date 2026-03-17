@@ -53,6 +53,8 @@ Notas:
 - `download_url` solo aparece si esta definido `PUBLIC_BASE_URL`.
 - Si se usan `mask_stamps` o `mask_signatures`, el OCR se hace sobre una version rasterizada
   del PDF con sellos/firmas enmascarados.
+- `mode=searchable_conservative` es una variante experimental para filtrar mejor
+  la capa OCR en regiones detectadas como sello.
 
 Ejemplo:
 ```bash
@@ -109,6 +111,21 @@ curl -X POST http://localhost:18010/ocr/file \
 ```
 
 Respuesta: misma estructura que `POST /ocr`.
+
+## Interfaces web internas
+
+### GET /stamps/review
+Revision manual de cajas de sellos sobre paginas completas.
+
+### GET /stamps/classify
+Clasificacion manual de recortes de sellos / firmas / logos.
+
+### GET /text/review
+Revision manual de cajas de texto (`text_block`) tomando `labels_auto` como base
+y guardando correcciones en `labels_reviewed`.
+
+### GET /text/review/skipped
+Revision final de paginas marcadas como `skipped` en la revision de texto.
 
 ## GET /file/{filename}
 Descarga el PDF con OCR aplicado.

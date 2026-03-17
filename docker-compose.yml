@@ -1,6 +1,7 @@
 services:
   ocr-service:
     build: .
+    shm_size: "8gb"
     ports:
       - "18010:8000"
     deploy:
@@ -13,8 +14,10 @@ services:
       OCR_OUT_DIR: /data/out
       OCR_LANG: spa
       OCR_MODE: searchable_cpu
-      REVIEW_APP_VERSION: "1"
-      STAMP_MODEL_PATH: /data/models/stamp_detector.pt
+      REVIEW_APP_VERSION: "1.2"
+      CLASSIFY_DIR: /data/classify
+      CLASSIFY_CONF_THRESHOLD: "0.99"
+      STAMP_MODEL_PATH: /data/models/stamp_detector_v2.pt
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
     volumes:

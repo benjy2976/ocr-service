@@ -13,7 +13,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
-RUN python3 -m pip install --no-cache-dir -r /app/requirements.txt
+RUN python3 -m pip install --no-cache-dir -r /app/requirements.txt \
+    && python3 -m pip install --no-cache-dir numpy==1.26.4 opencv-python==4.10.0.84 \
+    && python3 -m pip install --no-cache-dir paddlepaddle==2.6.2 \
+    && python3 -m pip install --no-cache-dir --no-deps paddleocr==2.7.3
 
 COPY app /app/app
 COPY scripts /app/scripts
