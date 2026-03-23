@@ -127,6 +127,42 @@ y guardando correcciones en `labels_reviewed`.
 ### GET /text/review/skipped
 Revision final de paginas marcadas como `skipped` en la revision de texto.
 
+### GET /text/review/compare
+Comparacion interactiva entre:
+- propuesta `auto`
+- propuesta `modelo`
+- propuesta `merge`
+
+Notas:
+- la propuesta `modelo` se genera en caliente para la imagen actual
+- `merge` se calcula en backend sin una segunda corrida del modelo
+- la edicion final sigue guardando en `labels_reviewed`
+
+### GET /text/review/qc
+Segundo control de paginas ya validadas.
+
+Notas:
+- usa orden estable segun `state.json`
+- guarda correcciones en `labels_qc`
+- no afecta la cola principal de revision
+
+### GET /models/test
+Vista web para probar modelos sobre PDFs del split de test descargados localmente.
+
+Capacidades:
+- seleccionar PDFs desde `samples_test`
+- navegar por paginas
+- correr inferencia en linea de:
+  - modelo de texto
+  - detector de sellos
+- dibujar cajas sobre la pagina renderizada
+
+Rutas asociadas:
+- `GET /models/test/pdfs`
+- `GET /models/test/pdf-info?pdf=...`
+- `GET /models/test/page.png?pdf=...&page=...`
+- `GET /models/test/infer?pdf=...&page=...&kind=text|stamps`
+
 ## GET /file/{filename}
 Descarga el PDF con OCR aplicado.
 

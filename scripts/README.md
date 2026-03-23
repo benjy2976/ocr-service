@@ -1,5 +1,23 @@
 # Scripts
 
+## Split documental vigente
+
+El split oficial actual del proyecto es:
+- `data/train_list.txt`: 900 documentos
+- `data/test_list.txt`: 100 documentos
+
+Convencion actual:
+- `train_list.txt` define el conjunto principal de trabajo
+- `download_sample_pdfs.py` descarga ese train a `data/samples_train`
+- `data/samples_train_list.txt` es la lista derivada de los PDFs descargados
+- `extract_stamp_pages.py` y los workspaces posteriores parten de ese train materializado
+- `test_list.txt` define el conjunto oficial de prueba documental
+- los PDFs de test pueden descargarse a `data/samples_test` para pruebas manuales
+
+Estado de listas anteriores:
+- `data/sample_list.txt` pertenece a una muestra previa mas pequena
+- hoy debe tratarse como flujo legado o auxiliar, no como split oficial actual
+
 ## build_diverse_sample.py
 
 ```bash
@@ -22,6 +40,9 @@ docker compose exec -T ocr-service python3 /app/scripts/build_stamp_dataset.py
 
 ## extract_stamp_candidates.py
 
+Flujo legado / auxiliar.
+Si se usa, normalmente toma `sample_list.txt`, no el split oficial actual.
+
 ```bash
 docker compose exec -T ocr-service python3 /app/scripts/extract_stamp_candidates.py \
   --list /data/sample_list.txt \
@@ -32,6 +53,10 @@ docker compose exec -T ocr-service python3 /app/scripts/extract_stamp_candidates
 ```
 
 ## extract_stamp_pages.py
+
+Flujo oficial actual para paginas base de entrenamiento / trabajo:
+- parte de `train_list.txt`
+- en la practica las paginas en `stamp_pages` y `text_pages` provienen del train de 900 PDFs
 
 ```bash
 docker compose exec -T ocr-service python3 /app/scripts/extract_stamp_pages.py \
@@ -45,10 +70,24 @@ docker compose exec -T ocr-service python3 /app/scripts/extract_stamp_pages.py \
 
 ## download_sample_pdfs.py
 
+Descarga local del split oficial de entrenamiento (`train_list.txt`) a `samples_train`.
+El resultado esperado luego queda reflejado en `samples_train_list.txt`.
+
 ```bash
 docker compose exec -T ocr-service python3 /app/scripts/download_sample_pdfs.py \
   --list /data/train_list.txt \
   --out /data/samples_train \
+  --sleep 0.2 \
+  --verbose
+```
+
+Descarga local del split oficial de test (`test_list.txt`) a `samples_test`.
+Se usa para la vista interactiva `/models/test`.
+
+```bash
+docker compose exec -T ocr-service python3 /app/scripts/download_sample_pdfs.py \
+  --list /data/test_list.txt \
+  --out /data/samples_test \
   --sleep 0.2 \
   --verbose
 ```
@@ -96,6 +135,9 @@ docker compose exec -T ocr-service python3 /app/scripts/build_detect_dataset.py 
 
 Hace una copia separada de las mismas paginas usadas para sellos, para trabajar
 las cajas de texto sin tocar `stamp_pages`.
+
+En el estado actual del proyecto, esas paginas vienen del train oficial:
+- `train_list.txt` -> `samples_train` -> `stamp_pages` -> `text_pages`
 
 ```bash
 docker compose exec -T ocr-service python3 /app/scripts/prepare_text_pages.py \
@@ -145,11 +187,29 @@ docker compose exec -T ocr-service python3 /app/scripts/build_text_detect_datase
 Rutas web:
 - `http://localhost:18010/text/review`
 - `http://localhost:18010/text/review/skipped`
+- `http://localhost:18010/text/review/compare`
+- `http://localhost:18010/text/review/qc`
 
 Politica:
 - `text/review` para la cola normal
 - `text/review/skipped` para casos dudosos dejados al final
 - las correcciones se guardan en `labels_reviewed`
+
+## Prueba manual de modelos sobre test
+
+Ruta web:
+- `http://localhost:18010/models/test`
+
+Requiere:
+- PDFs descargados en `data/samples_test`
+
+Permite:
+- seleccionar PDFs de test
+- navegar por paginas
+- ejecutar en linea:
+  - modelo de `text_block`
+  - detector de sellos
+- dibujar cajas sobre la pagina sin generar labels persistentes
 
 ## predict_classify.py
 

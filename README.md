@@ -30,6 +30,17 @@ Workspaces relevantes:
 - `data/out/stamp_pages` paginas usadas para sellos
 - `data/out/text_pages` copia separada para trabajar cajas de texto
 
+Split documental vigente:
+- `data/train_list.txt`: 900 documentos
+- `data/test_list.txt`: 100 documentos
+
+Estado actual de listas:
+- `train_list.txt` y `test_list.txt` son la definicion oficial del split
+- `data/samples_train` es la descarga local del train
+- `data/samples_train_list.txt` es la lista derivada de esos PDFs descargados
+- `data/samples_test` es la descarga local del split de test para pruebas manuales e inferencia interactiva
+- `data/sample_list.txt` queda como flujo legado / auxiliar, no como base oficial actual
+
 ## Variables de entorno
 - OCR_TMP_DIR   (default: /data/tmp)
 - OCR_OUT_DIR   (default: /data/out)
@@ -125,6 +136,16 @@ Luego descarga el PDF usando `download_path` o `download_url` (si `PUBLIC_BASE_U
 - `http://localhost:18010/stamps/classify`
 - `http://localhost:18010/text/review`
 - `http://localhost:18010/text/review/skipped`
+- `http://localhost:18010/text/review/compare`
+- `http://localhost:18010/text/review/qc`
+- `http://localhost:18010/models/test`
+
+### Vista de prueba de modelos
+- `/models/test` usa PDFs descargados en `data/samples_test`
+- permite elegir PDFs de `test_list.txt`, cambiar de pagina y probar modelos en linea
+- `Probar texto` corre el detector de `text_block` activo
+- `Probar sellos` corre el detector de sellos activo
+- las cajas se dibujan sobre la pagina renderizada sin guardar labels
 
 ### Desde otro contenedor en la misma red Docker
 Usa el nombre del servicio y el puerto interno:

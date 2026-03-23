@@ -97,6 +97,28 @@ Se reutilizan las mismas paginas base usadas para sellos, pero en una ruta separ
 - `data/out/stamp_pages` se mantiene intacto
 - `data/out/text_pages` es el nuevo workspace para texto
 
+## Split documental oficial
+El split documental vigente del proyecto es:
+- `data/train_list.txt`: 900 registros
+- `data/test_list.txt`: 100 registros
+
+Estas dos listas son la definicion oficial actual de la muestra documental.
+
+### Como se materializa ese split
+- `train_list.txt` define el conjunto de PDFs usados para trabajo y entrenamiento
+- esos PDFs se descargan a `data/samples_train`
+- `data/samples_train_list.txt` es la lista derivada de esos PDFs ya descargados
+- `test_list.txt` define el conjunto de prueba documental
+- esos PDFs pueden descargarse a `data/samples_test`
+- de `samples_train` salen los workspaces de paginas:
+  - `data/out/stamp_pages`
+  - `data/out/text_pages`
+
+### Estado de archivos anteriores
+- `data/sample_list.txt` corresponde a un flujo anterior de muestra pequena
+- hoy debe considerarse un artefacto legado o auxiliar
+- no es la base oficial actual del split documental
+
 ### Estructura actual
 - `images`: copia de las paginas
 - `labels_auto`: cajas automáticas de texto
@@ -143,6 +165,43 @@ Ya existen dos rutas separadas:
 - puede `Saltar` casos dudosos
 - los `skipped` se revisan al final
 - si el usuario refresca, primero debe recuperar su item `in_process`
+
+## Vista de comparacion y control adicional
+Existen vistas auxiliares separadas para no interferir con la cola principal:
+- `/text/review/compare`
+  - compara propuesta `auto` vs propuesta `modelo`
+  - el modelo de texto se ejecuta en caliente para la imagen actual
+  - `merge` se calcula en backend en el mismo request
+- `/text/review/qc`
+  - segundo control sobre paginas ya validadas
+  - guarda correcciones en `labels_qc`
+  - usa navegacion ordenada y no aleatoria
+
+## Vista de prueba de modelos con PDFs de test
+Se implemento una vista de pruebas manuales:
+- `/models/test`
+
+Objetivo:
+- probar modelos sobre el split oficial de test sin tocar labels de trabajo
+- navegar entre PDFs y paginas
+- ejecutar inferencia en linea a voluntad
+
+Fuente documental:
+- `data/test_list.txt`
+- descarga local en `data/samples_test`
+
+Capacidades actuales:
+- seleccionar PDFs desde una lista o aleatoriamente
+- cambiar entre paginas del PDF
+- renderizar pagina a imagen en backend
+- correr el modelo activo de `text_block`
+- correr el detector activo de sellos / firmas / logos
+- dibujar las cajas sobre la pagina sin persistir anotaciones
+
+Uso esperado:
+- validar visualmente nuevas corridas de modelos
+- comparar comportamiento sobre documentos nunca usados para entrenamiento
+- inspeccionar errores antes de promover un modelo como activo
 
 ## Siguiente hito
 Entrenar un primer detector de `text_block` sobre el dataset de texto.
