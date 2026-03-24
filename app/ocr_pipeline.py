@@ -1527,7 +1527,7 @@ def _side_contact_segments(
                 continue
             if bbox.y1 > det_rect.y1 - margin_y and bbox.y0 < det_rect.y1:
                 segments.append((max(det_rect.x0, bbox.x0), min(det_rect.x1, bbox.x1)))
-    return _merge_segments(segments, gap=2.0)
+    return _merge_segments(segments, gap=0.0)
 
 
 def _merge_adjacent_rects(rects: list[fitz.Rect]) -> list[fitz.Rect]:
@@ -1669,10 +1669,6 @@ def _build_ocr_redaction_rects(
 
     margin_x = max(5.0, det_rect.width * (1.0 - shrink_factor))
     margin_y = max(5.0, det_rect.height * (1.0 - shrink_factor))
-    keep_left = min(margin_x, max(1.0, _side_max_invasion(det_rect, text_rects, side="left", margin_x=margin_x, margin_y=margin_y) + 1.0))
-    keep_right = min(margin_x, max(1.0, _side_max_invasion(det_rect, text_rects, side="right", margin_x=margin_x, margin_y=margin_y) + 1.0))
-    keep_top = min(margin_y, max(1.0, _side_max_invasion(det_rect, text_rects, side="top", margin_x=margin_x, margin_y=margin_y) + 1.0))
-    keep_bottom = min(margin_y, max(1.0, _side_max_invasion(det_rect, text_rects, side="bottom", margin_x=margin_x, margin_y=margin_y) + 1.0))
     segments = {
         "left": _side_contact_segments(det_rect, text_rects, side="left", margin_x=margin_x, margin_y=margin_y),
         "right": _side_contact_segments(det_rect, text_rects, side="right", margin_x=margin_x, margin_y=margin_y),
@@ -1681,14 +1677,67 @@ def _build_ocr_redaction_rects(
     }
 
     keep_rects: list[fitz.Rect] = []
-    for y0, y1 in segments["left"]:
-        keep_rects.append(fitz.Rect(det_rect.x0, y0, min(det_rect.x1, det_rect.x0 + keep_left), y1))
-    for y0, y1 in segments["right"]:
-        keep_rects.append(fitz.Rect(max(det_rect.x0, det_rect.x1 - keep_right), y0, det_rect.x1, y1))
-    for x0, x1 in segments["top"]:
-        keep_rects.append(fitz.Rect(x0, det_rect.y0, x1, min(det_rect.y1, det_rect.y0 + keep_top)))
-    for x0, x1 in segments["bottom"]:
-        keep_rects.append(fitz.Rect(x0, max(det_rect.y0, det_rect.y1 - keep_bottom), x1, det_rect.y1))
+    for bbox in text_rects:
+        overlap_y0 = max(det_rect.y0, bbox.y0)
+        overlap_y1 = min(det_rect.y1, bbox.y1)
+        overlap_x0 = max(det_rect.x0, bbox.x0)
+        overlap_x1 = min(det_rect.x1, bbox.x1)
+
+        if overlap_y1 > overlap_y0:
+            if bbox.x0 < det_rect.x0 + margin_x and bbox.x1 > det_rect.x0:
+                keep_left = min(
+                    margin_x,
+                    max(1.0, min(det_rect.x1, bbox.x1) - det_rect.x0 + 1.0),
+                )
+                keep_rects.append(
+                    fitz.Rect(
+                        det_rect.x0,
+                        overlap_y0,
+                        min(det_rect.x1, det_rect.x0 + keep_left),
+                        overlap_y1,
+                    )
+                )
+            if bbox.x1 > det_rect.x1 - margin_x and bbox.x0 < det_rect.x1:
+                keep_right = min(
+                    margin_x,
+                    max(1.0, det_rect.x1 - max(det_rect.x0, bbox.x0) + 1.0),
+                )
+                keep_rects.append(
+                    fitz.Rect(
+                        max(det_rect.x0, det_rect.x1 - keep_right),
+                        overlap_y0,
+                        det_rect.x1,
+                        overlap_y1,
+                    )
+                )
+
+        if overlap_x1 > overlap_x0:
+            if bbox.y0 < det_rect.y0 + margin_y and bbox.y1 > det_rect.y0:
+                keep_top = min(
+                    margin_y,
+                    max(1.0, min(det_rect.y1, bbox.y1) - det_rect.y0 + 1.0),
+                )
+                keep_rects.append(
+                    fitz.Rect(
+                        overlap_x0,
+                        det_rect.y0,
+                        overlap_x1,
+                        min(det_rect.y1, det_rect.y0 + keep_top),
+                    )
+                )
+            if bbox.y1 > det_rect.y1 - margin_y and bbox.y0 < det_rect.y1:
+                keep_bottom = min(
+                    margin_y,
+                    max(1.0, det_rect.y1 - max(det_rect.y0, bbox.y0) + 1.0),
+                )
+                keep_rects.append(
+                    fitz.Rect(
+                        overlap_x0,
+                        max(det_rect.y0, det_rect.y1 - keep_bottom),
+                        overlap_x1,
+                        det_rect.y1,
+                    )
+                )
 
     keep_rects = [r for r in keep_rects if r.width > 0 and r.height > 0]
     if not keep_rects:
