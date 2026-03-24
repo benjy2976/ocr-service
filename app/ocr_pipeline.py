@@ -4,6 +4,8 @@ import time
 import uuid
 import subprocess
 import tempfile
+import hashlib
+import re
 from pathlib import Path
 
 import requests
@@ -28,7 +30,7 @@ DEFAULT_STAMP_RECT_ASPECT_MIN = float(os.getenv("OCR_STAMP_RECT_ASPECT_MIN", "0.
 DEFAULT_STAMP_RECT_ASPECT_MAX = float(os.getenv("OCR_STAMP_RECT_ASPECT_MAX", "2.0"))
 DEFAULT_SIGNATURE_REGION = float(os.getenv("OCR_SIGNATURE_REGION", "0.35"))
 DEFAULT_MASK_DILATE = int(os.getenv("OCR_MASK_DILATE", "4"))
-DEFAULT_MASK_GRAYSCALE = os.getenv("OCR_MASK_GRAYSCALE", "true").lower() in (
+DEFAULT_MASK_GRAYSCALE = os.getenv("OCR_MASK_GRAYSCALE", "false").lower() in (
     "1",
     "true",
     "yes",
@@ -101,6 +103,68 @@ if _OCR_JOBS_RAW:
 
 _STAMP_DETECTOR = None
 _STAMP_DETECTOR_LABELS = None
+_TEXT_BLOCK_DETECTOR = None
+_TEXT_BLOCK_DETECTOR_PATH = None
+
+
+def _safe_slug(value: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9_.-]+", "_", value)
+    return slug.strip("._") or "default"
+
+
+def _text_pages_dir() -> Path:
+    return Path(DEFAULT_OUT_DIR) / "text_pages"
+
+
+def _text_block_model_path() -> Path | None:
+    raw = os.getenv("OCR_TEXT_BLOCK_MODEL_PATH", "").strip() or os.getenv("TEXT_REVIEW_MODEL_PATH", "").strip()
+    if raw:
+        path = Path(raw)
+        return path if path.exists() else None
+    models_dir = _text_pages_dir() / "models"
+    if not models_dir.exists():
+        return None
+    candidates = [p for p in models_dir.glob("*.pt") if p.exists()]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda p: p.name)
+    return candidates[-1]
+
+
+def _load_text_block_detector():
+    global _TEXT_BLOCK_DETECTOR, _TEXT_BLOCK_DETECTOR_PATH
+    model_path = _text_block_model_path()
+    if model_path is None:
+        return None, None
+    model_path = model_path.resolve()
+    if _TEXT_BLOCK_DETECTOR is not None and _TEXT_BLOCK_DETECTOR_PATH == model_path:
+        return _TEXT_BLOCK_DETECTOR, model_path
+    try:
+        from ultralytics import YOLO
+    except Exception as exc:
+        raise RuntimeError("Ultralytics is not installed in the service") from exc
+    _TEXT_BLOCK_DETECTOR = YOLO(str(model_path))
+    _TEXT_BLOCK_DETECTOR_PATH = model_path
+    return _TEXT_BLOCK_DETECTOR, model_path
+
+
+def _resolve_text_block_device() -> str:
+    raw = os.getenv("OCR_TEXT_BLOCK_DEVICE", "").strip().lower() or os.getenv("TEXT_REVIEW_MODEL_DEVICE", "auto").strip().lower()
+    if raw and raw != "auto":
+        return raw
+    try:
+        import torch
+        return "0" if torch.cuda.is_available() else "cpu"
+    except Exception:
+        return "cpu"
+
+
+DEFAULT_TEXT_BLOCK_CONF = float(
+    os.getenv("OCR_TEXT_BLOCK_CONF", "").strip() or os.getenv("TEXT_REVIEW_MODEL_CONF", "0.25")
+)
+DEFAULT_TEXT_BLOCK_IMGSZ = int(
+    os.getenv("OCR_TEXT_BLOCK_IMGSZ", "").strip() or os.getenv("TEXT_REVIEW_MODEL_IMGSZ", "960")
+)
 
 
 def _load_stamp_detector():
@@ -173,6 +237,40 @@ def _detect_stamp_boxes(
                 }
             )
     return boxes
+
+
+def _detect_text_block_boxes(
+    image_bgr: np.ndarray,
+    conf: float,
+    imgsz: int,
+) -> tuple[list[dict], str | None]:
+    model, model_path = _load_text_block_detector()
+    if model is None or model_path is None:
+        return [], None
+    device = _resolve_text_block_device()
+    results = model.predict(
+        source=image_bgr,
+        imgsz=imgsz,
+        conf=conf,
+        device=device,
+        verbose=False,
+    )
+    boxes: list[dict] = []
+    if results:
+        for r in results:
+            if r.boxes is None:
+                continue
+            for b in r.boxes:
+                x1, y1, x2, y2 = b.xyxy[0].tolist()
+                x1 = float(x1)
+                y1 = float(y1)
+                x2 = float(x2)
+                y2 = float(y2)
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                boxes.append({"x1": x1, "y1": y1, "x2": x2, "y2": y2})
+    boxes.sort(key=lambda b: (round(b["y1"], 3), round(b["x1"], 3)))
+    return boxes, model_path.stem
 
 
 def _color_mask_hsv(
@@ -612,7 +710,21 @@ def _prepare_conservative_working_pdf(
             pix.height, pix.width, 3
         )
         img = img_color.copy()
-        text_lines = _detect_text_line_boxes(img_color)
+        text_boxes, _text_model_name = _detect_text_block_boxes(
+            img_color,
+            conf=DEFAULT_TEXT_BLOCK_CONF,
+            imgsz=DEFAULT_TEXT_BLOCK_IMGSZ,
+        )
+        text_rects = [
+            fitz.Rect(float(box["x1"]), float(box["y1"]), float(box["x2"]), float(box["y2"]))
+            for box in text_boxes
+        ]
+        if not text_rects:
+            text_lines = _detect_text_line_boxes(img_color)
+            text_rects = [
+                fitz.Rect(float(x), float(y), float(x + w), float(y + h))
+                for x, y, w, h in text_lines
+            ]
         boxes = _detect_stamp_boxes(
             img_color,
             conf=conf,
@@ -621,6 +733,7 @@ def _prepare_conservative_working_pdf(
         )
 
         applied_boxes = []
+        page_rect = fitz.Rect(0, 0, img.shape[1], img.shape[0])
         for box in boxes:
             x1, y1, x2, y2 = box["x1"], box["y1"], box["x2"], box["y2"]
             x1 = max(0, min(img.shape[1] - 1, x1))
@@ -630,21 +743,30 @@ def _prepare_conservative_working_pdf(
             if x2 <= x1 or y2 <= y1:
                 continue
 
-            det_box = (x1, y1, x2 - x1, y2 - y1)
-            intersects_text = any(
-                _intersection_ratio(det_box, line_box) >= 0.1 for line_box in text_lines
+            det_rect = fitz.Rect(float(x1), float(y1), float(x2), float(y2))
+            redactions, segments = _build_ocr_redaction_rects(
+                page_rect,
+                det_rect,
+                text_rects=text_rects,
+                shrink_factor=0.78,
+                detector_label=box.get("label") or "",
             )
-            roi = img[y1:y2, x1:x2]
-            roi_out, mask = _apply_conservative_mask_to_box(
-                roi,
-                intersects_text=intersects_text,
-            )
-            img[y1:y2, x1:x2] = roi_out
+            masked_pixels = 0
+            for red in redactions:
+                rx0 = max(0, min(img.shape[1], int(np.floor(red.x0))))
+                ry0 = max(0, min(img.shape[0], int(np.floor(red.y0))))
+                rx1 = max(0, min(img.shape[1], int(np.ceil(red.x1))))
+                ry1 = max(0, min(img.shape[0], int(np.ceil(red.y1))))
+                if rx1 <= rx0 or ry1 <= ry0:
+                    continue
+                masked_pixels += max(0, rx1 - rx0) * max(0, ry1 - ry0)
+                img[ry0:ry1, rx0:rx1] = (255, 255, 255)
             applied_boxes.append(
                 {
                     **box,
-                    "intersects_text": intersects_text,
-                    "mask_pixels": int((mask == 255).sum()),
+                    "mask_pixels": int(masked_pixels),
+                    "redactions": [fitz.Rect(r) for r in redactions],
+                    "segments": segments,
                 }
             )
 
@@ -652,12 +774,11 @@ def _prepare_conservative_working_pdf(
             vis = img_color.copy()
             for box in applied_boxes:
                 x1, y1, x2, y2 = box["x1"], box["y1"], box["x2"], box["y2"]
-                color = (0, 165, 255) if box.get("intersects_text") else (0, 255, 0)
+                color = (0, 255, 0)
                 cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
                 label = box.get("label") or ""
                 score = box.get("conf")
-                suffix = "txt" if box.get("intersects_text") else "free"
-                text = f"{label} {score:.2f} {suffix}" if score is not None else f"{label} {suffix}"
+                text = f"{label} {score:.2f}" if score is not None else label
                 cv2.putText(
                     vis,
                     text,
@@ -668,15 +789,19 @@ def _prepare_conservative_working_pdf(
                     2,
                     cv2.LINE_AA,
                 )
+                for red in box.get("redactions") or []:
+                    cv2.rectangle(
+                        vis,
+                        (int(round(red.x0)), int(round(red.y0))),
+                        (int(round(red.x1)), int(round(red.y1))),
+                        (0, 165, 255),
+                        2,
+                    )
             vis_rgb = cv2.cvtColor(vis, cv2.COLOR_BGR2RGB)
             vis_bytes = cv2.imencode(".png", vis_rgb)[1].tobytes()
             rect = fitz.Rect(0, 0, page.rect.width, page.rect.height)
             det_page = detected_doc.new_page(width=page.rect.width, height=page.rect.height)
             det_page.insert_image(rect, stream=vis_bytes)
-
-        if grayscale:
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img_bytes = cv2.imencode(".png", img_rgb)[1].tobytes()
         rect = fitz.Rect(0, 0, page.rect.width, page.rect.height)
@@ -791,9 +916,6 @@ def _prepare_masked_pdf(
             det_page = detected_doc.new_page(width=page.rect.width, height=page.rect.height)
             det_page.insert_image(rect, stream=vis_bytes)
 
-        if grayscale:
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img_bytes = cv2.imencode(".png", img_rgb)[1].tobytes()
         rect = fitz.Rect(0, 0, page.rect.width, page.rect.height)
@@ -1012,6 +1134,191 @@ def _merge_ocr_layer(
     return output_pdf
 
 
+def _extract_ocr_layer_pdf(
+    input_pdf: Path,
+    output_pdf: Path,
+) -> Path:
+    doc = fitz.open(input_pdf)
+    try:
+        _strip_images_inplace(doc)
+        output_pdf.parent.mkdir(parents=True, exist_ok=True)
+        doc.save(output_pdf)
+    finally:
+        doc.close()
+    return output_pdf
+
+
+def _insert_invisible_words(page: fitz.Page, words: list[tuple]) -> None:
+    for word in words:
+        if len(word) < 5:
+            continue
+        x0, y0, x1, y1, text = word[:5]
+        if not text:
+            continue
+        bbox = fitz.Rect(float(x0), float(y0), float(x1), float(y1))
+        if bbox.width <= 0 or bbox.height <= 0:
+            continue
+        font_size = max(4.0, min(18.0, bbox.height * 0.8))
+        inserted = 0
+        for _ in range(5):
+            inserted = page.insert_textbox(
+                bbox,
+                str(text),
+                fontsize=font_size,
+                fontname="helv",
+                render_mode=3,
+                align=0,
+            )
+            if inserted > 0:
+                break
+            font_size = max(4.0, font_size * 0.8)
+        if inserted == 0:
+            page.insert_text(
+                fitz.Point(bbox.x0, bbox.y1),
+                str(text),
+                fontsize=font_size,
+                fontname="helv",
+                render_mode=3,
+            )
+
+
+def _line_group_key(word: tuple) -> tuple[int, int, int] | None:
+    if len(word) >= 8:
+        return (int(word[5]), int(word[6]), 0)
+    return None
+
+
+def _insert_invisible_text_lines(page: fitz.Page, words: list[tuple]) -> None:
+    if not words:
+        return
+
+    keyed_groups: dict[tuple[int, int, int], list[tuple]] = {}
+    unkeyed: list[tuple] = []
+    for word in words:
+        key = _line_group_key(word)
+        if key is None:
+            unkeyed.append(word)
+        else:
+            keyed_groups.setdefault(key, []).append(word)
+
+    line_groups = list(keyed_groups.values())
+    if unkeyed:
+        unkeyed_sorted = sorted(unkeyed, key=lambda w: (float(w[1]), float(w[0])))
+        current: list[tuple] = []
+        current_center = None
+        current_height = None
+        for word in unkeyed_sorted:
+            rect = _word_rect(word)
+            if rect is None:
+                continue
+            center = (rect.y0 + rect.y1) / 2.0
+            height = rect.height
+            if not current:
+                current = [word]
+                current_center = center
+                current_height = height
+                continue
+            tol = max(3.0, (current_height or height) * 0.6)
+            if abs(center - (current_center or center)) <= tol:
+                current.append(word)
+                current_center = ((current_center or center) * (len(current) - 1) + center) / len(current)
+                current_height = max(current_height or 0.0, height)
+            else:
+                line_groups.append(current)
+                current = [word]
+                current_center = center
+                current_height = height
+        if current:
+            line_groups.append(current)
+
+    ordered_groups: list[list[tuple]] = []
+    for group in line_groups:
+        clean_group = [w for w in group if _word_rect(w) is not None and len(w) >= 5 and str(w[4]).strip()]
+        if clean_group:
+            clean_group.sort(key=lambda w: float(w[0]))
+            ordered_groups.append(clean_group)
+    ordered_groups.sort(key=lambda g: min(float(w[1]) for w in g))
+
+    for group in ordered_groups:
+        rects = [_word_rect(w) for w in group]
+        rects = [r for r in rects if r is not None]
+        if not rects:
+            continue
+        line_bbox = fitz.Rect(
+            min(r.x0 for r in rects),
+            min(r.y0 for r in rects),
+            max(r.x1 for r in rects),
+            max(r.y1 for r in rects),
+        )
+        text = " ".join(str(w[4]).strip() for w in group if len(w) >= 5 and str(w[4]).strip())
+        if not text:
+            continue
+        font_size = max(4.0, min(18.0, line_bbox.height * 0.8))
+        inserted = 0
+        for _ in range(5):
+            inserted = page.insert_textbox(
+                line_bbox,
+                text,
+                fontsize=font_size,
+                fontname="helv",
+                render_mode=3,
+                align=0,
+            )
+            if inserted > 0:
+                break
+            font_size = max(4.0, font_size * 0.8)
+        if inserted == 0:
+            page.insert_text(
+                fitz.Point(line_bbox.x0, line_bbox.y1),
+                text,
+                fontsize=font_size,
+                fontname="helv",
+                render_mode=3,
+            )
+
+
+def _word_rect(word: tuple) -> fitz.Rect | None:
+    if len(word) < 4:
+        return None
+    x0, y0, x1, y1 = word[:4]
+    rect = fitz.Rect(float(x0), float(y0), float(x1), float(y1))
+    if rect.width <= 0 or rect.height <= 0:
+        return None
+    return rect
+
+
+def _rect_intersection_ratio(a: fitz.Rect, b: fitz.Rect) -> float:
+    x0 = max(a.x0, b.x0)
+    y0 = max(a.y0, b.y0)
+    x1 = min(a.x1, b.x1)
+    y1 = min(a.y1, b.y1)
+    if x1 <= x0 or y1 <= y0:
+        return 0.0
+    inter = (x1 - x0) * (y1 - y0)
+    area = a.width * a.height
+    if area <= 0:
+        return 0.0
+    return inter / area
+
+
+def _word_intersects_regions(
+    word: tuple,
+    regions: list[fitz.Rect],
+    *,
+    min_ratio: float = 0.2,
+) -> bool:
+    rect = _word_rect(word)
+    if rect is None or not regions:
+        return False
+    center = fitz.Point((rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0)
+    for region in regions:
+        if region.contains(center):
+            return True
+        if _rect_intersection_ratio(rect, region) >= min_ratio:
+            return True
+    return False
+
+
 def _redact_ocr_layer_by_detector(
     source_pdf: Path,
     ocr_pdf: Path,
@@ -1024,6 +1331,7 @@ def _redact_ocr_layer_by_detector(
 ) -> Path:
     source = fitz.open(source_pdf)
     doc = fitz.open(ocr_pdf)
+    out = fitz.open()
     try:
         _strip_images_inplace(doc)
         page_count = min(len(source), len(doc))
@@ -1031,26 +1339,40 @@ def _redact_ocr_layer_by_detector(
             source_page = source.load_page(i)
             page = doc.load_page(i)
             words = page.get_text("words")
+            word_rects = _word_boxes_as_rects(words)
             blocked = _page_detector_boxes_in_pdf_coords(
                 source_page,
                 conf=conf,
                 imgsz=imgsz,
                 allowed_classes=allowed_classes,
             )
-            for rect in blocked:
-                redaction = _build_ocr_redaction_rect(
+            text_rects, _text_model_name = _page_text_boxes_in_pdf_coords(
+                source_page,
+                conf=DEFAULT_TEXT_BLOCK_CONF,
+                imgsz=DEFAULT_TEXT_BLOCK_IMGSZ,
+            )
+            overlap_rects = text_rects or word_rects
+            for item in blocked:
+                rect = item["rect"]
+                redactions, _segments = _build_ocr_redaction_rects(
                     source_page.rect,
                     rect,
-                    words=words,
+                    text_rects=overlap_rects,
                     shrink_factor=shrink_factor,
+                    detector_label=item.get("label") or "",
                 )
-                page.add_redact_annot(redaction, fill=(1, 1, 1))
+                for redaction in redactions:
+                    page.add_redact_annot(redaction, fill=(1, 1, 1))
             if blocked:
                 page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+            kept_words = page.get_text("words")
+            new_page = out.new_page(width=source_page.rect.width, height=source_page.rect.height)
+            _insert_invisible_words(new_page, kept_words)
 
         output_pdf.parent.mkdir(parents=True, exist_ok=True)
-        doc.save(output_pdf)
+        out.save(output_pdf)
     finally:
+        out.close()
         doc.close()
         source.close()
     return output_pdf
@@ -1062,7 +1384,7 @@ def _page_detector_boxes_in_pdf_coords(
     conf: float,
     imgsz: int,
     allowed_classes: set[str] | None,
-) -> list[fitz.Rect]:
+) -> list[dict]:
     mat = fitz.Matrix(DEFAULT_MASK_DPI / 72, DEFAULT_MASK_DPI / 72)
     pix = page.get_pixmap(matrix=mat, alpha=False)
     img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, 3)
@@ -1077,11 +1399,172 @@ def _page_detector_boxes_in_pdf_coords(
 
     sx = page.rect.width / float(img.shape[1])
     sy = page.rect.height / float(img.shape[0])
-    rects: list[fitz.Rect] = []
+    rects: list[dict] = []
     for box in boxes:
         x1, y1, x2, y2 = box["x1"], box["y1"], box["x2"], box["y2"]
-        rects.append(fitz.Rect(x1 * sx, y1 * sy, x2 * sx, y2 * sy))
+        rects.append(
+            {
+                "rect": fitz.Rect(x1 * sx, y1 * sy, x2 * sx, y2 * sy),
+                "label": box.get("label") or "",
+                "conf": box.get("conf"),
+            }
+        )
     return rects
+
+
+def _page_text_boxes_in_pdf_coords(
+    page: fitz.Page,
+    *,
+    conf: float,
+    imgsz: int,
+) -> tuple[list[fitz.Rect], str | None]:
+    mat = fitz.Matrix(DEFAULT_MASK_DPI / 72, DEFAULT_MASK_DPI / 72)
+    pix = page.get_pixmap(matrix=mat, alpha=False)
+    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, 3)
+    boxes, model_name = _detect_text_block_boxes(
+        img,
+        conf=conf,
+        imgsz=imgsz,
+    )
+    if not boxes:
+        return [], model_name
+
+    sx = page.rect.width / float(img.shape[1])
+    sy = page.rect.height / float(img.shape[0])
+    rects: list[fitz.Rect] = []
+    for box in boxes:
+        rects.append(
+            fitz.Rect(
+                box["x1"] * sx,
+                box["y1"] * sy,
+                box["x2"] * sx,
+                box["y2"] * sy,
+            )
+        )
+    return rects, model_name
+
+
+def _word_boxes_as_rects(words: list[tuple]) -> list[fitz.Rect]:
+    rects: list[fitz.Rect] = []
+    for word in words:
+        x0, y0, x1, y1 = word[:4]
+        rects.append(fitz.Rect(x0, y0, x1, y1))
+    return rects
+
+
+def _rects_overlap_side(det_rect: fitz.Rect, rects: list[fitz.Rect], *, side: str, margin_x: float, margin_y: float) -> bool:
+    for bbox in rects:
+        if side == "left":
+            if bbox.y1 <= det_rect.y0 or bbox.y0 >= det_rect.y1:
+                continue
+            if bbox.x0 < det_rect.x0 + margin_x and bbox.x1 > det_rect.x0:
+                return True
+        elif side == "right":
+            if bbox.y1 <= det_rect.y0 or bbox.y0 >= det_rect.y1:
+                continue
+            if bbox.x1 > det_rect.x1 - margin_x and bbox.x0 < det_rect.x1:
+                return True
+        elif side == "top":
+            if bbox.x1 <= det_rect.x0 or bbox.x0 >= det_rect.x1:
+                continue
+            if bbox.y0 < det_rect.y0 + margin_y and bbox.y1 > det_rect.y0:
+                return True
+        elif side == "bottom":
+            if bbox.x1 <= det_rect.x0 or bbox.x0 >= det_rect.x1:
+                continue
+            if bbox.y1 > det_rect.y1 - margin_y and bbox.y0 < det_rect.y1:
+                return True
+    return False
+
+
+def _rect_intersects(a: fitz.Rect, b: fitz.Rect) -> bool:
+    return not (a.x1 <= b.x0 or a.x0 >= b.x1 or a.y1 <= b.y0 or a.y0 >= b.y1)
+
+
+def _merge_segments(segments: list[tuple[float, float]], *, gap: float = 0.0) -> list[tuple[float, float]]:
+    if not segments:
+        return []
+    ordered = sorted((min(a, b), max(a, b)) for a, b in segments if b > a)
+    if not ordered:
+        return []
+    merged: list[list[float]] = [[ordered[0][0], ordered[0][1]]]
+    for start, end in ordered[1:]:
+        cur = merged[-1]
+        if start <= cur[1] + gap:
+            cur[1] = max(cur[1], end)
+        else:
+            merged.append([start, end])
+    return [(a, b) for a, b in merged]
+
+
+def _side_contact_segments(
+    det_rect: fitz.Rect,
+    text_rects: list[fitz.Rect],
+    *,
+    side: str,
+    margin_x: float,
+    margin_y: float,
+) -> list[tuple[float, float]]:
+    segments: list[tuple[float, float]] = []
+    for bbox in text_rects:
+        if side == "left":
+            if bbox.y1 <= det_rect.y0 or bbox.y0 >= det_rect.y1:
+                continue
+            if bbox.x0 < det_rect.x0 + margin_x and bbox.x1 > det_rect.x0:
+                segments.append((max(det_rect.y0, bbox.y0), min(det_rect.y1, bbox.y1)))
+        elif side == "right":
+            if bbox.y1 <= det_rect.y0 or bbox.y0 >= det_rect.y1:
+                continue
+            if bbox.x1 > det_rect.x1 - margin_x and bbox.x0 < det_rect.x1:
+                segments.append((max(det_rect.y0, bbox.y0), min(det_rect.y1, bbox.y1)))
+        elif side == "top":
+            if bbox.x1 <= det_rect.x0 or bbox.x0 >= det_rect.x1:
+                continue
+            if bbox.y0 < det_rect.y0 + margin_y and bbox.y1 > det_rect.y0:
+                segments.append((max(det_rect.x0, bbox.x0), min(det_rect.x1, bbox.x1)))
+        elif side == "bottom":
+            if bbox.x1 <= det_rect.x0 or bbox.x0 >= det_rect.x1:
+                continue
+            if bbox.y1 > det_rect.y1 - margin_y and bbox.y0 < det_rect.y1:
+                segments.append((max(det_rect.x0, bbox.x0), min(det_rect.x1, bbox.x1)))
+    return _merge_segments(segments, gap=2.0)
+
+
+def _merge_adjacent_rects(rects: list[fitz.Rect]) -> list[fitz.Rect]:
+    merged = [fitz.Rect(r) for r in rects if r.width > 0 and r.height > 0]
+    changed = True
+    eps = 0.01
+    while changed:
+        changed = False
+        out: list[fitz.Rect] = []
+        while merged:
+            cur = merged.pop(0)
+            merged_with_cur = False
+            for i, other in enumerate(merged):
+                same_x = abs(cur.x0 - other.x0) <= eps and abs(cur.x1 - other.x1) <= eps
+                touch_y = abs(cur.y1 - other.y0) <= eps or abs(other.y1 - cur.y0) <= eps
+                overlap_y = min(cur.y1, other.y1) - max(cur.y0, other.y0)
+                same_y = abs(cur.y0 - other.y0) <= eps and abs(cur.y1 - other.y1) <= eps
+                touch_x = abs(cur.x1 - other.x0) <= eps or abs(other.x1 - cur.x0) <= eps
+                overlap_x = min(cur.x1, other.x1) - max(cur.x0, other.x0)
+                if same_x and (touch_y or overlap_y >= -eps):
+                    cur = fitz.Rect(cur.x0, min(cur.y0, other.y0), cur.x1, max(cur.y1, other.y1))
+                    merged.pop(i)
+                    merged_with_cur = True
+                    changed = True
+                    break
+                if same_y and (touch_x or overlap_x >= -eps):
+                    cur = fitz.Rect(min(cur.x0, other.x0), cur.y0, max(cur.x1, other.x1), cur.y1)
+                    merged.pop(i)
+                    merged_with_cur = True
+                    changed = True
+                    break
+            if merged_with_cur:
+                merged.insert(0, cur)
+            else:
+                out.append(cur)
+        merged = out
+    return merged
 
 
 def _shrink_rect(rect: fitz.Rect, factor: float) -> fitz.Rect:
@@ -1093,64 +1576,63 @@ def _shrink_rect(rect: fitz.Rect, factor: float) -> fitz.Rect:
     return fitz.Rect(cx - half_w, cy - half_h, cx + half_w, cy + half_h)
 
 
-def _build_ocr_redaction_rect(
+def _side_max_invasion(
+    det_rect: fitz.Rect,
+    text_rects: list[fitz.Rect],
+    *,
+    side: str,
+    margin_x: float,
+    margin_y: float,
+) -> float:
+    max_depth = 0.0
+    for bbox in text_rects:
+        if side == "left":
+            if bbox.y1 <= det_rect.y0 or bbox.y0 >= det_rect.y1:
+                continue
+            if bbox.x0 < det_rect.x0 + margin_x and bbox.x1 > det_rect.x0:
+                depth = max(0.0, min(det_rect.x1, bbox.x1) - det_rect.x0)
+                max_depth = max(max_depth, depth)
+        elif side == "right":
+            if bbox.y1 <= det_rect.y0 or bbox.y0 >= det_rect.y1:
+                continue
+            if bbox.x1 > det_rect.x1 - margin_x and bbox.x0 < det_rect.x1:
+                depth = max(0.0, det_rect.x1 - max(det_rect.x0, bbox.x0))
+                max_depth = max(max_depth, depth)
+        elif side == "top":
+            if bbox.x1 <= det_rect.x0 or bbox.x0 >= det_rect.x1:
+                continue
+            if bbox.y0 < det_rect.y0 + margin_y and bbox.y1 > det_rect.y0:
+                depth = max(0.0, min(det_rect.y1, bbox.y1) - det_rect.y0)
+                max_depth = max(max_depth, depth)
+        elif side == "bottom":
+            if bbox.x1 <= det_rect.x0 or bbox.x0 >= det_rect.x1:
+                continue
+            if bbox.y1 > det_rect.y1 - margin_y and bbox.y0 < det_rect.y1:
+                depth = max(0.0, det_rect.y1 - max(det_rect.y0, bbox.y0))
+                max_depth = max(max_depth, depth)
+    return max_depth
+
+
+def _build_ocr_redaction_rects_fixed(
     page_rect: fitz.Rect,
     det_rect: fitz.Rect,
     *,
-    words: list[tuple],
+    text_rects: list[fitz.Rect],
     shrink_factor: float,
-) -> fitz.Rect:
+) -> tuple[list[fitz.Rect], dict[str, list[tuple[float, float]]]]:
     margin_x = max(5.0, det_rect.width * (1.0 - shrink_factor))
     margin_y = max(5.0, det_rect.height * (1.0 - shrink_factor))
+    segments = {
+        "left": _side_contact_segments(det_rect, text_rects, side="left", margin_x=margin_x, margin_y=margin_y),
+        "right": _side_contact_segments(det_rect, text_rects, side="right", margin_x=margin_x, margin_y=margin_y),
+        "top": _side_contact_segments(det_rect, text_rects, side="top", margin_x=margin_x, margin_y=margin_y),
+        "bottom": _side_contact_segments(det_rect, text_rects, side="bottom", margin_x=margin_x, margin_y=margin_y),
+    }
 
-    def side_overlap(side: str) -> bool:
-        for word in words:
-            x0, y0, x1, y1 = word[:4]
-            bbox = fitz.Rect(x0, y0, x1, y1)
-            if side == "left":
-                if bbox.y1 <= det_rect.y0 or bbox.y0 >= det_rect.y1:
-                    continue
-                if bbox.x0 < det_rect.x0 + margin_x and bbox.x1 > det_rect.x0:
-                    return True
-            elif side == "right":
-                if bbox.y1 <= det_rect.y0 or bbox.y0 >= det_rect.y1:
-                    continue
-                if bbox.x1 > det_rect.x1 - margin_x and bbox.x0 < det_rect.x1:
-                    return True
-            elif side == "top":
-                if bbox.x1 <= det_rect.x0 or bbox.x0 >= det_rect.x1:
-                    continue
-                if bbox.y0 < det_rect.y0 + margin_y and bbox.y1 > det_rect.y0:
-                    return True
-            elif side == "bottom":
-                if bbox.x1 <= det_rect.x0 or bbox.x0 >= det_rect.x1:
-                    continue
-                if bbox.y1 > det_rect.y1 - margin_y and bbox.y0 < det_rect.y1:
-                    return True
-        return False
-
-    left_overlap = side_overlap("left")
-    right_overlap = side_overlap("right")
-    top_overlap = side_overlap("top")
-    bottom_overlap = side_overlap("bottom")
-
-    x0 = det_rect.x0
-    x1 = det_rect.x1
-    y0 = det_rect.y0
-    y1 = det_rect.y1
-
-    # Default rule: remove the whole detected box.
-    # Only keep an internal margin on the sides that actually touch text.
-    if left_overlap:
-        x0 = min(det_rect.x1, det_rect.x0 + margin_x)
-    if right_overlap:
-        x1 = max(det_rect.x0, det_rect.x1 - margin_x)
-    if top_overlap:
-        y0 = min(det_rect.y1, det_rect.y0 + margin_y)
-    if bottom_overlap:
-        y1 = max(det_rect.y0, det_rect.y1 - margin_y)
-
-    # If the remaining rect collapses, keep at least a thin conservative slice.
+    x0 = det_rect.x0 + (margin_x if segments["left"] else 0.0)
+    x1 = det_rect.x1 - (margin_x if segments["right"] else 0.0)
+    y0 = det_rect.y0 + (margin_y if segments["top"] else 0.0)
+    y1 = det_rect.y1 - (margin_y if segments["bottom"] else 0.0)
     if x1 <= x0:
         cx = (det_rect.x0 + det_rect.x1) / 2.0
         half = max(2.0, margin_x / 2.0)
@@ -1161,56 +1643,102 @@ def _build_ocr_redaction_rect(
         half = max(2.0, margin_y / 2.0)
         y0 = max(det_rect.y0, cy - half)
         y1 = min(det_rect.y1, cy + half)
-
-    return fitz.Rect(
+    return [fitz.Rect(
         max(page_rect.x0, x0),
         max(page_rect.y0, y0),
         min(page_rect.x1, x1),
         min(page_rect.y1, y1),
-    )
+    )], segments
+
+
+def _build_ocr_redaction_rects(
+    page_rect: fitz.Rect,
+    det_rect: fitz.Rect,
+    *,
+    text_rects: list[fitz.Rect],
+    shrink_factor: float,
+    detector_label: str = "",
+) -> tuple[list[fitz.Rect], dict[str, list[tuple[float, float]]]]:
+    if detector_label != "sello_redondo":
+        return _build_ocr_redaction_rects_fixed(
+            page_rect,
+            det_rect,
+            text_rects=text_rects,
+            shrink_factor=shrink_factor,
+        )
+
+    margin_x = max(5.0, det_rect.width * (1.0 - shrink_factor))
+    margin_y = max(5.0, det_rect.height * (1.0 - shrink_factor))
+    keep_left = min(margin_x, max(1.0, _side_max_invasion(det_rect, text_rects, side="left", margin_x=margin_x, margin_y=margin_y) + 1.0))
+    keep_right = min(margin_x, max(1.0, _side_max_invasion(det_rect, text_rects, side="right", margin_x=margin_x, margin_y=margin_y) + 1.0))
+    keep_top = min(margin_y, max(1.0, _side_max_invasion(det_rect, text_rects, side="top", margin_x=margin_x, margin_y=margin_y) + 1.0))
+    keep_bottom = min(margin_y, max(1.0, _side_max_invasion(det_rect, text_rects, side="bottom", margin_x=margin_x, margin_y=margin_y) + 1.0))
+    segments = {
+        "left": _side_contact_segments(det_rect, text_rects, side="left", margin_x=margin_x, margin_y=margin_y),
+        "right": _side_contact_segments(det_rect, text_rects, side="right", margin_x=margin_x, margin_y=margin_y),
+        "top": _side_contact_segments(det_rect, text_rects, side="top", margin_x=margin_x, margin_y=margin_y),
+        "bottom": _side_contact_segments(det_rect, text_rects, side="bottom", margin_x=margin_x, margin_y=margin_y),
+    }
+
+    keep_rects: list[fitz.Rect] = []
+    for y0, y1 in segments["left"]:
+        keep_rects.append(fitz.Rect(det_rect.x0, y0, min(det_rect.x1, det_rect.x0 + keep_left), y1))
+    for y0, y1 in segments["right"]:
+        keep_rects.append(fitz.Rect(max(det_rect.x0, det_rect.x1 - keep_right), y0, det_rect.x1, y1))
+    for x0, x1 in segments["top"]:
+        keep_rects.append(fitz.Rect(x0, det_rect.y0, x1, min(det_rect.y1, det_rect.y0 + keep_top)))
+    for x0, x1 in segments["bottom"]:
+        keep_rects.append(fitz.Rect(x0, max(det_rect.y0, det_rect.y1 - keep_bottom), x1, det_rect.y1))
+
+    keep_rects = [r for r in keep_rects if r.width > 0 and r.height > 0]
+    if not keep_rects:
+        return [fitz.Rect(
+            max(page_rect.x0, det_rect.x0),
+            max(page_rect.y0, det_rect.y0),
+            min(page_rect.x1, det_rect.x1),
+            min(page_rect.y1, det_rect.y1),
+        )], segments
+
+    xs = sorted({det_rect.x0, det_rect.x1, *[r.x0 for r in keep_rects], *[r.x1 for r in keep_rects]})
+    ys = sorted({det_rect.y0, det_rect.y1, *[r.y0 for r in keep_rects], *[r.y1 for r in keep_rects]})
+    redactions: list[fitz.Rect] = []
+    for xi in range(len(xs) - 1):
+        for yi in range(len(ys) - 1):
+            x0, x1 = xs[xi], xs[xi + 1]
+            y0, y1 = ys[yi], ys[yi + 1]
+            if x1 <= x0 or y1 <= y0:
+                continue
+            cell = fitz.Rect(x0, y0, x1, y1)
+            mx = (x0 + x1) / 2.0
+            my = (y0 + y1) / 2.0
+            if not det_rect.contains(fitz.Point(mx, my)):
+                continue
+            if any(r.contains(fitz.Point(mx, my)) for r in keep_rects):
+                continue
+            clipped = fitz.Rect(
+                max(page_rect.x0, cell.x0),
+                max(page_rect.y0, cell.y0),
+                min(page_rect.x1, cell.x1),
+                min(page_rect.y1, cell.y1),
+            )
+            if clipped.width > 0 and clipped.height > 0:
+                redactions.append(clipped)
+    return _merge_adjacent_rects(redactions), segments
 
 
 def _detect_box_text_overlap_sides(
     det_rect: fitz.Rect,
-    words: list[tuple],
+    text_rects: list[fitz.Rect],
     *,
     shrink_factor: float,
 ) -> dict[str, bool]:
-    margin_x = max(5.0, det_rect.width * (1.0 - shrink_factor))
-    margin_y = max(5.0, det_rect.height * (1.0 - shrink_factor))
-
-    def side_overlap(side: str) -> bool:
-        for word in words:
-            x0, y0, x1, y1 = word[:4]
-            bbox = fitz.Rect(x0, y0, x1, y1)
-            if side == "left":
-                if bbox.y1 <= det_rect.y0 or bbox.y0 >= det_rect.y1:
-                    continue
-                if bbox.x0 < det_rect.x0 + margin_x and bbox.x1 > det_rect.x0:
-                    return True
-            elif side == "right":
-                if bbox.y1 <= det_rect.y0 or bbox.y0 >= det_rect.y1:
-                    continue
-                if bbox.x1 > det_rect.x1 - margin_x and bbox.x0 < det_rect.x1:
-                    return True
-            elif side == "top":
-                if bbox.x1 <= det_rect.x0 or bbox.x0 >= det_rect.x1:
-                    continue
-                if bbox.y0 < det_rect.y0 + margin_y and bbox.y1 > det_rect.y0:
-                    return True
-            elif side == "bottom":
-                if bbox.x1 <= det_rect.x0 or bbox.x0 >= det_rect.x1:
-                    continue
-                if bbox.y1 > det_rect.y1 - margin_y and bbox.y0 < det_rect.y1:
-                    return True
-        return False
-
-    return {
-        "left": side_overlap("left"),
-        "right": side_overlap("right"),
-        "top": side_overlap("top"),
-        "bottom": side_overlap("bottom"),
-    }
+    _rects, segments = _build_ocr_redaction_rects(
+        fitz.Rect(det_rect),
+        det_rect,
+        text_rects=text_rects,
+        shrink_factor=shrink_factor,
+    )
+    return {k: bool(v) for k, v in segments.items()}
 
 
 def _render_overlap_debug_pdf(
@@ -1227,31 +1755,54 @@ def _render_overlap_debug_pdf(
     try:
         for i in range(len(source)):
             page = source.load_page(i)
-            words = page.get_text("words")
+            word_rects = _word_boxes_as_rects(page.get_text("words"))
             blocked = _page_detector_boxes_in_pdf_coords(
                 page,
                 conf=conf,
                 imgsz=imgsz,
                 allowed_classes=allowed_classes,
             )
+            text_rects, text_model_name = _page_text_boxes_in_pdf_coords(
+                page,
+                conf=DEFAULT_TEXT_BLOCK_CONF,
+                imgsz=DEFAULT_TEXT_BLOCK_IMGSZ,
+            )
+            overlap_rects = text_rects or word_rects
             new_page = out.new_page(width=page.rect.width, height=page.rect.height)
             new_page.show_pdf_page(page.rect, source, i)
 
-            for rect in blocked:
-                sides = _detect_box_text_overlap_sides(
-                    rect,
-                    words,
-                    shrink_factor=shrink_factor,
+            for text_rect in text_rects:
+                new_page.draw_rect(text_rect, color=(0.0, 0.65, 0.0), width=0.8)
+
+            if text_rects:
+                new_page.insert_text(
+                    fitz.Point(12, 14),
+                    f"text_model={text_model_name or 'unknown'}",
+                    fontsize=8,
+                    color=(0.0, 0.5, 0.0),
                 )
-                redaction = _build_ocr_redaction_rect(
-                    page.rect,
-                    rect,
-                    words=words,
-                    shrink_factor=shrink_factor,
+            else:
+                new_page.insert_text(
+                    fitz.Point(12, 14),
+                    "text_source=ocr_words_fallback",
+                    fontsize=8,
+                    color=(0.5, 0.2, 0.0),
                 )
 
+            for item in blocked:
+                rect = item["rect"]
+                redactions, segments = _build_ocr_redaction_rects(
+                    page.rect,
+                    rect,
+                    text_rects=overlap_rects,
+                    shrink_factor=shrink_factor,
+                    detector_label=item.get("label") or "",
+                )
+                sides = {k: bool(v) for k, v in segments.items()}
+
                 new_page.draw_rect(rect, color=(1, 0, 0), width=1.5)
-                new_page.draw_rect(redaction, color=(0, 0.5, 1), width=1.0)
+                for redaction in redactions:
+                    new_page.draw_rect(redaction, color=(0, 0.5, 1), width=1.0)
                 label = (
                     f"L={int(sides['left'])} "
                     f"R={int(sides['right'])} "
@@ -1265,37 +1816,26 @@ def _render_overlap_debug_pdf(
                     color=(1, 0, 0),
                 )
 
-                if sides["left"]:
-                    x = min(rect.x1, rect.x0 + max(5.0, rect.width * (1.0 - shrink_factor)))
-                    new_page.draw_line(
-                        fitz.Point(x, rect.y0),
-                        fitz.Point(x, rect.y1),
-                        color=(1, 0.5, 0),
-                        width=1,
-                    )
-                if sides["right"]:
-                    x = max(rect.x0, rect.x1 - max(5.0, rect.width * (1.0 - shrink_factor)))
-                    new_page.draw_line(
-                        fitz.Point(x, rect.y0),
-                        fitz.Point(x, rect.y1),
-                        color=(1, 0.5, 0),
-                        width=1,
-                    )
-                if sides["top"]:
-                    y = min(rect.y1, rect.y0 + max(5.0, rect.height * (1.0 - shrink_factor)))
-                    new_page.draw_line(
-                        fitz.Point(rect.x0, y),
-                        fitz.Point(rect.x1, y),
-                        color=(1, 0.5, 0),
-                        width=1,
-                    )
-                if sides["bottom"]:
-                    y = max(rect.y0, rect.y1 - max(5.0, rect.height * (1.0 - shrink_factor)))
-                    new_page.draw_line(
-                        fitz.Point(rect.x0, y),
-                        fitz.Point(rect.x1, y),
-                        color=(1, 0.5, 0),
-                        width=1,
+                side_margin_x = max(5.0, rect.width * (1.0 - shrink_factor))
+                side_margin_y = max(5.0, rect.height * (1.0 - shrink_factor))
+                x_left = min(rect.x1, rect.x0 + side_margin_x)
+                x_right = max(rect.x0, rect.x1 - side_margin_x)
+                y_top = min(rect.y1, rect.y0 + side_margin_y)
+                y_bottom = max(rect.y0, rect.y1 - side_margin_y)
+                for y0, y1 in segments["left"]:
+                    new_page.draw_line(fitz.Point(x_left, y0), fitz.Point(x_left, y1), color=(1, 0.5, 0), width=1)
+                for y0, y1 in segments["right"]:
+                    new_page.draw_line(fitz.Point(x_right, y0), fitz.Point(x_right, y1), color=(1, 0.5, 0), width=1)
+                for x0, x1 in segments["top"]:
+                    new_page.draw_line(fitz.Point(x0, y_top), fitz.Point(x1, y_top), color=(1, 0.5, 0), width=1)
+                for x0, x1 in segments["bottom"]:
+                    new_page.draw_line(fitz.Point(x0, y_bottom), fitz.Point(x1, y_bottom), color=(1, 0.5, 0), width=1)
+                if item.get("label"):
+                    new_page.insert_text(
+                        fitz.Point(rect.x0, min(page.rect.y1 - 2, rect.y1 + 10)),
+                        item["label"],
+                        fontsize=7,
+                        color=(0.6, 0.0, 0.0),
                     )
 
         output_pdf.parent.mkdir(parents=True, exist_ok=True)
@@ -1448,18 +1988,32 @@ def run_ocr(
     elif mode == "searchable_conservative":
         out_pdf = out_dir / f"{token}_searchable.pdf"
         working_pdf = out_dir / f"{token}_working.pdf"
+        original_searchable_pdf = out_dir / f"{token}_original_searchable.pdf"
+        working_searchable_pdf = out_dir / f"{token}_working_searchable.pdf"
         detected_pdf = out_dir / f"{token}_detected.pdf" if DEFAULT_MASK_SAVE_DETECTIONS else None
-        allowed = set(DEFAULT_MASK_DETECTOR_CLASSES) if DEFAULT_MASK_DETECTOR_CLASSES else None
+        allowed_all = set(DEFAULT_MASK_DETECTOR_CLASSES) if DEFAULT_MASK_DETECTOR_CLASSES else None
+        allowed_round = {"sello_redondo"}
+        if allowed_all is not None:
+            allowed_round = allowed_round & allowed_all
         _prepare_conservative_working_pdf(
             src_pdf,
             working_pdf,
             conf=DEFAULT_MASK_DETECTOR_CONF,
             imgsz=DEFAULT_MASK_DETECTOR_IMGSZ,
-            allowed_classes=allowed,
+            allowed_classes=allowed_round or None,
             grayscale=mask_grayscale,
             detected_pdf=detected_pdf,
         )
-        working_searchable_pdf = out_dir / f"{token}_working_searchable.pdf"
+        _ocr_searchable_cpu(
+            src_pdf,
+            original_searchable_pdf,
+            lang,
+            deskew=deskew,
+            clean=clean,
+            remove_vectors=remove_vectors,
+            psm=psm,
+            jobs=jobs,
+        )
         _ocr_searchable_cpu(
             working_pdf,
             working_searchable_pdf,
@@ -1470,39 +2024,24 @@ def run_ocr(
             psm=psm,
             jobs=jobs,
         )
-        original_searchable_pdf = out_dir / f"{token}_original_searchable.pdf"
-        _ocr_searchable_cpu(
-            src_pdf,
-            original_searchable_pdf,
-            lang,
-            deskew=deskew,
-            clean=clean,
-            remove_vectors=remove_vectors,
-            psm=psm,
-            jobs=jobs,
-        )
         filtered_layer_pdf = out_dir / f"{token}_filtered_layer.pdf"
         overlap_debug_pdf = out_dir / f"{token}_overlap_debug.pdf"
+        overlap_debug_searchable_pdf = out_dir / f"{token}_overlap_debug_searchable.pdf"
+        overlap_debug_working_searchable_pdf = out_dir / f"{token}_overlap_debug_working_searchable.pdf"
         _render_overlap_debug_pdf(
             src_pdf,
             overlap_debug_pdf,
             conf=DEFAULT_MASK_DETECTOR_CONF,
             imgsz=DEFAULT_MASK_DETECTOR_IMGSZ,
-            allowed_classes=allowed,
+            allowed_classes=allowed_all,
             shrink_factor=0.78,
         )
-        _redact_ocr_layer_by_detector(
-            src_pdf,
-            original_searchable_pdf,
-            conf=DEFAULT_MASK_DETECTOR_CONF,
-            imgsz=DEFAULT_MASK_DETECTOR_IMGSZ,
-            allowed_classes=allowed,
-            output_pdf=filtered_layer_pdf,
-            shrink_factor=0.78,
-        )
+        _extract_ocr_layer_pdf(working_searchable_pdf, filtered_layer_pdf)
         _merge_ocr_layer(src_pdf, filtered_layer_pdf, out_pdf)
+        _merge_ocr_layer(overlap_debug_pdf, filtered_layer_pdf, overlap_debug_searchable_pdf)
+        _merge_ocr_layer(overlap_debug_pdf, working_searchable_pdf, overlap_debug_working_searchable_pdf)
         masked_pdf = working_pdf
-        masked_searchable_pdf = working_searchable_pdf
+        masked_searchable_pdf = None
         paddle_masked_searchable_pdf = None
         paddle_searchable_pdf = None
         text = _extract_text(out_pdf)
@@ -1530,12 +2069,24 @@ def run_ocr(
         "output_pdf": str(out_pdf) if out_pdf else None,
         "masked_pdf": str(masked_pdf) if masked_pdf else None,
         "masked_output_pdf": str(masked_searchable_pdf) if masked_searchable_pdf else None,
+        "original_searchable_pdf": str(original_searchable_pdf)
+        if "original_searchable_pdf" in locals()
+        else None,
+        "working_searchable_pdf": str(working_searchable_pdf)
+        if "working_searchable_pdf" in locals()
+        else None,
         "detected_pdf": str(detected_pdf) if detected_pdf else None,
             "paddle_masked_searchable_pdf": str(paddle_masked_searchable_pdf)
         if "paddle_masked_searchable_pdf" in locals() and paddle_masked_searchable_pdf
         else None,
         "overlap_debug_pdf": str(overlap_debug_pdf)
         if "overlap_debug_pdf" in locals()
+        else None,
+        "overlap_debug_searchable_pdf": str(overlap_debug_searchable_pdf)
+        if "overlap_debug_searchable_pdf" in locals()
+        else None,
+        "overlap_debug_working_searchable_pdf": str(overlap_debug_working_searchable_pdf)
+        if "overlap_debug_working_searchable_pdf" in locals()
         else None,
         "paddle_searchable_pdf": str(paddle_searchable_pdf)
         if "paddle_searchable_pdf" in locals() and paddle_searchable_pdf
@@ -1690,18 +2241,32 @@ def run_ocr_file(
     elif mode == "searchable_conservative":
         out_pdf = out_dir / f"{token}_searchable.pdf"
         working_pdf = out_dir / f"{token}_working.pdf"
+        original_searchable_pdf = out_dir / f"{token}_original_searchable.pdf"
+        working_searchable_pdf = out_dir / f"{token}_working_searchable.pdf"
         detected_pdf = out_dir / f"{token}_detected.pdf" if DEFAULT_MASK_SAVE_DETECTIONS else None
-        allowed = set(DEFAULT_MASK_DETECTOR_CLASSES) if DEFAULT_MASK_DETECTOR_CLASSES else None
+        allowed_all = set(DEFAULT_MASK_DETECTOR_CLASSES) if DEFAULT_MASK_DETECTOR_CLASSES else None
+        allowed_round = {"sello_redondo"}
+        if allowed_all is not None:
+            allowed_round = allowed_round & allowed_all
         _prepare_conservative_working_pdf(
             src_pdf,
             working_pdf,
             conf=DEFAULT_MASK_DETECTOR_CONF,
             imgsz=DEFAULT_MASK_DETECTOR_IMGSZ,
-            allowed_classes=allowed,
+            allowed_classes=allowed_round or None,
             grayscale=mask_grayscale,
             detected_pdf=detected_pdf,
         )
-        working_searchable_pdf = out_dir / f"{token}_working_searchable.pdf"
+        _ocr_searchable_cpu(
+            src_pdf,
+            original_searchable_pdf,
+            lang,
+            deskew=deskew,
+            clean=clean,
+            remove_vectors=remove_vectors,
+            psm=psm,
+            jobs=jobs,
+        )
         _ocr_searchable_cpu(
             working_pdf,
             working_searchable_pdf,
@@ -1712,39 +2277,24 @@ def run_ocr_file(
             psm=psm,
             jobs=jobs,
         )
-        original_searchable_pdf = out_dir / f"{token}_original_searchable.pdf"
-        _ocr_searchable_cpu(
-            src_pdf,
-            original_searchable_pdf,
-            lang,
-            deskew=deskew,
-            clean=clean,
-            remove_vectors=remove_vectors,
-            psm=psm,
-            jobs=jobs,
-        )
         filtered_layer_pdf = out_dir / f"{token}_filtered_layer.pdf"
         overlap_debug_pdf = out_dir / f"{token}_overlap_debug.pdf"
+        overlap_debug_searchable_pdf = out_dir / f"{token}_overlap_debug_searchable.pdf"
+        overlap_debug_working_searchable_pdf = out_dir / f"{token}_overlap_debug_working_searchable.pdf"
         _render_overlap_debug_pdf(
             src_pdf,
             overlap_debug_pdf,
             conf=DEFAULT_MASK_DETECTOR_CONF,
             imgsz=DEFAULT_MASK_DETECTOR_IMGSZ,
-            allowed_classes=allowed,
+            allowed_classes=allowed_all,
             shrink_factor=0.78,
         )
-        _redact_ocr_layer_by_detector(
-            src_pdf,
-            original_searchable_pdf,
-            conf=DEFAULT_MASK_DETECTOR_CONF,
-            imgsz=DEFAULT_MASK_DETECTOR_IMGSZ,
-            allowed_classes=allowed,
-            output_pdf=filtered_layer_pdf,
-            shrink_factor=0.78,
-        )
+        _extract_ocr_layer_pdf(working_searchable_pdf, filtered_layer_pdf)
         _merge_ocr_layer(src_pdf, filtered_layer_pdf, out_pdf)
+        _merge_ocr_layer(overlap_debug_pdf, filtered_layer_pdf, overlap_debug_searchable_pdf)
+        _merge_ocr_layer(overlap_debug_pdf, working_searchable_pdf, overlap_debug_working_searchable_pdf)
         masked_pdf = working_pdf
-        masked_searchable_pdf = working_searchable_pdf
+        masked_searchable_pdf = None
         paddle_masked_searchable_pdf = None
         paddle_searchable_pdf = None
         text = _extract_text(out_pdf)
@@ -1772,12 +2322,24 @@ def run_ocr_file(
         "output_pdf": str(out_pdf) if out_pdf else None,
         "masked_pdf": str(masked_pdf) if masked_pdf else None,
         "masked_output_pdf": str(masked_searchable_pdf) if masked_searchable_pdf else None,
+        "original_searchable_pdf": str(original_searchable_pdf)
+        if "original_searchable_pdf" in locals()
+        else None,
+        "working_searchable_pdf": str(working_searchable_pdf)
+        if "working_searchable_pdf" in locals()
+        else None,
         "detected_pdf": str(detected_pdf) if detected_pdf else None,
             "paddle_masked_searchable_pdf": str(paddle_masked_searchable_pdf)
         if "paddle_masked_searchable_pdf" in locals() and paddle_masked_searchable_pdf
         else None,
         "overlap_debug_pdf": str(overlap_debug_pdf)
         if "overlap_debug_pdf" in locals()
+        else None,
+        "overlap_debug_searchable_pdf": str(overlap_debug_searchable_pdf)
+        if "overlap_debug_searchable_pdf" in locals()
+        else None,
+        "overlap_debug_working_searchable_pdf": str(overlap_debug_working_searchable_pdf)
+        if "overlap_debug_working_searchable_pdf" in locals()
         else None,
         "paddle_searchable_pdf": str(paddle_searchable_pdf)
         if "paddle_searchable_pdf" in locals() and paddle_searchable_pdf
