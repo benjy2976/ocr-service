@@ -117,6 +117,7 @@ docker compose up --build
 | MUNIS_BASE_URL                    | (obligatorio) | URL base de Munis |
 | MUNIS_OCR_TOKEN                   | (obligatorio) | Bearer token de autenticación |
 | OCR_WORKER_NAME                   | ocr-worker-1  | Nombre del worker en logs |
+| OCR_WORKER_CONCURRENCY            | 1             | Número de consumidores paralelos dentro del mismo servicio |
 | OCR_POLL_INTERVAL_SECONDS         | 10            | Segundos entre polls si la cola está vacía |
 | OCR_WORKER_ENABLED                | true          | Poner "false" para deshabilitar sin borrar el contenedor |
 | OCR_CALLBACK_TIMEOUT_SECONDS      | 30            | Timeout HTTP para callbacks a Munis |
@@ -134,6 +135,10 @@ pull-next (POST) → 204 → esperar → reintentar
                         → complete (POST, multipart)   ← OK
                         → fail    (POST, JSON)         ← error
 ```
+
+Si `OCR_WORKER_CONCURRENCY > 1`, un solo contenedor `ocr-worker` levanta varios
+consumidores en paralelo sobre la misma cola. Cada consumidor usa un nombre
+derivado de `OCR_WORKER_NAME` para que Munis y los logs distingan los leases.
 
 ### Configuración necesaria en Munis
 

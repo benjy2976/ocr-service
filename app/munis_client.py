@@ -21,6 +21,7 @@ Catálogo regulation_file_ocrs.status
 
 import logging
 import os
+import time
 from pathlib import Path
 
 import requests
@@ -35,7 +36,14 @@ MUNIS_BASE_URL: str = os.getenv("MUNIS_BASE_URL", "").rstrip("/")
 MUNIS_OCR_TOKEN: str = os.getenv("MUNIS_OCR_TOKEN", "")
 OCR_CALLBACK_TIMEOUT: int = int(os.getenv("OCR_CALLBACK_TIMEOUT_SECONDS", "30"))
 OCR_DOWNLOAD_TIMEOUT: int = int(os.getenv("OCR_DOWNLOAD_TIMEOUT_SECONDS", "120"))
-WORKER_NAME: str = os.getenv("OCR_WORKER_NAME", "ocr-worker-1")
+OCR_HTTP_MAX_RETRIES: int = max(0, int(os.getenv("OCR_HTTP_MAX_RETRIES", "6")))
+OCR_HTTP_RETRY_BASE_SECONDS: float = max(
+    0.5, float(os.getenv("OCR_HTTP_RETRY_BASE_SECONDS", "2"))
+)
+OCR_HTTP_RETRY_MAX_SECONDS: float = max(
+    OCR_HTTP_RETRY_BASE_SECONDS,
+    float(os.getenv("OCR_HTTP_RETRY_MAX_SECONDS", "60")),
+)
 
 # Activar con OCR_HTTP_DEBUG=true — solo para debug, nunca en producción
 _HTTP_DEBUG: bool = os.getenv("OCR_HTTP_DEBUG", "false").lower() in ("1", "true", "yes")
@@ -146,12 +154,78 @@ def _url(path: str) -> str:
     return f"{MUNIS_BASE_URL}{path}"
 
 
+def _worker_name(explicit_name: str | None = None) -> str:
+    return (explicit_name or os.getenv("OCR_WORKER_NAME", "ocr-worker-1")).strip() or "ocr-worker-1"
+
+
+def _is_retryable_status(status_code: int) -> bool:
+    return status_code == 429 or 500 <= status_code < 600
+
+
+def _retry_delay(response: requests.Response | None, attempt: int) -> float:
+    if response is not None:
+        retry_after = (response.headers.get("Retry-After") or "").strip()
+        if retry_after:
+            try:
+                return min(float(retry_after), OCR_HTTP_RETRY_MAX_SECONDS)
+            except ValueError:
+                pass
+    delay = OCR_HTTP_RETRY_BASE_SECONDS * (2 ** max(0, attempt - 1))
+    return min(delay, OCR_HTTP_RETRY_MAX_SECONDS)
+
+
+def _request_with_retry(
+    send,
+    *,
+    method: str,
+    url: str,
+    timeout_label: str,
+) -> requests.Response:
+    attempt = 0
+    while True:
+        attempt += 1
+        response: requests.Response | None = None
+        try:
+            response = send()
+            if _is_retryable_status(response.status_code) and attempt <= OCR_HTTP_MAX_RETRIES:
+                delay = _retry_delay(response, attempt)
+                logger.warning(
+                    "%s %s devolvió %s; reintentando en %.1fs (intento %d/%d)",
+                    method,
+                    url,
+                    response.status_code,
+                    delay,
+                    attempt,
+                    OCR_HTTP_MAX_RETRIES,
+                )
+                response.close()
+                time.sleep(delay)
+                continue
+            return response
+        except requests.RequestException as exc:
+            if attempt > OCR_HTTP_MAX_RETRIES:
+                raise
+            delay = _retry_delay(response, attempt)
+            logger.warning(
+                "%s %s falló (%s); reintentando en %.1fs (intento %d/%d)",
+                method,
+                url,
+                exc.__class__.__name__,
+                delay,
+                attempt,
+                OCR_HTTP_MAX_RETRIES,
+            )
+            if response is not None:
+                response.close()
+            time.sleep(delay)
+
+
 # ---------------------------------------------------------------------------
 # Operaciones de cola
 # ---------------------------------------------------------------------------
 
 
-def pull_next() -> dict | None:
+def pull_next(worker_name: str | None = None) -> dict | None:
     """
     POST /api/ocr/normatividad/queue/pull-next
 
@@ -163,8 +237,13 @@ def pull_next() -> dict | None:
     """
     url = _url("/api/ocr/normatividad/queue/pull-next")
     _dbg("POST", url)
-    headers = {**_headers(), "X-OCR-Processor": WORKER_NAME}
-    resp = requests.post(url, headers=headers, timeout=OCR_CALLBACK_TIMEOUT)
+    headers = {**_headers(), "X-OCR-Processor": _worker_name(worker_name)}
+    resp = _request_with_retry(
+        lambda: requests.post(url, headers=headers, timeout=OCR_CALLBACK_TIMEOUT),
+        method="POST",
+        url=url,
+        timeout_label="callback",
+    )
     _dbg("POST", url, resp.status_code, resp.text if resp.status_code != 204 else "(vacío)")
 
     if resp.status_code == 204:
@@ -180,7 +259,7 @@ def pull_next() -> dict | None:
     return body
 
 
-def mark_processing(queue_id: int | str) -> dict:
+def mark_processing(queue_id: int | str, worker_name: str | None = None) -> dict:
     """
     POST /api/ocr/normatividad/queue/{queue_id}/processing
 
@@ -190,9 +269,14 @@ def mark_processing(queue_id: int | str) -> dict:
         dict con el estado actualizado del item (status normalizado).
     """
     url = _url(f"/api/ocr/normatividad/queue/{queue_id}/processing")
-    body = {"processor": WORKER_NAME}
+    body = {"processor": _worker_name(worker_name)}
     _dbg("POST", url, body=str(body))
-    resp = requests.post(url, headers=_headers(), json=body, timeout=OCR_CALLBACK_TIMEOUT)
+    resp = _request_with_retry(
+        lambda: requests.post(url, headers=_headers(), json=body, timeout=OCR_CALLBACK_TIMEOUT),
+        method="POST",
+        url=url,
+        timeout_label="callback",
+    )
     _dbg("POST", url, resp.status_code, resp.text)
     resp.raise_for_status()
 
@@ -210,7 +294,13 @@ def download_source(queue_id: int | str, dest_path: Path) -> None:
     """
     url = _url(f"/api/ocr/normatividad/queue/{queue_id}/source")
     _dbg("GET", url)
-    with requests.get(url, headers=_headers(), stream=True, timeout=OCR_DOWNLOAD_TIMEOUT) as resp:
+    resp = _request_with_retry(
+        lambda: requests.get(url, headers=_headers(), stream=True, timeout=OCR_DOWNLOAD_TIMEOUT),
+        method="GET",
+        url=url,
+        timeout_label="download",
+    )
+    with resp:
         _dbg(
             "GET", url, resp.status_code,
             f"Content-Type: {resp.headers.get('Content-Type')} | "
@@ -245,15 +335,23 @@ def complete(queue_id: int | str, pdf_path: Path, duration_ms: int | None = None
         data["duration_ms"] = str(duration_ms)
     _dbg("POST", url, body=f"ocr_file={pdf_path.name} | data={data}")
 
-    with open(pdf_path, "rb") as fh:
-        files = {"ocr_file": (pdf_path.name, fh, "application/pdf")}
-        resp = requests.post(
-            url,
-            headers=_headers(),
-            data=data,
-            files=files,
-            timeout=OCR_CALLBACK_TIMEOUT,
-        )
+    def _send_complete() -> requests.Response:
+        with open(pdf_path, "rb") as fh:
+            files = {"ocr_file": (pdf_path.name, fh, "application/pdf")}
+            return requests.post(
+                url,
+                headers=_headers(),
+                data=data,
+                files=files,
+                timeout=OCR_CALLBACK_TIMEOUT,
+            )
+
+    resp = _request_with_retry(
+        _send_complete,
+        method="POST",
+        url=url,
+        timeout_label="callback",
+    )
     _dbg("POST", url, resp.status_code, resp.text)
     resp.raise_for_status()
 
@@ -283,7 +381,12 @@ def fail(queue_id: int | str, reason: str, duration_ms: int | None = None) -> No
         body["duration_ms"] = duration_ms
     _dbg("POST", url, body=str(body))
 
-    resp = requests.post(url, headers=_headers(), json=body, timeout=OCR_CALLBACK_TIMEOUT)
+    resp = _request_with_retry(
+        lambda: requests.post(url, headers=_headers(), json=body, timeout=OCR_CALLBACK_TIMEOUT),
+        method="POST",
+        url=url,
+        timeout_label="callback",
+    )
     _dbg("POST", url, resp.status_code, resp.text)
 
     if not resp.ok:
