@@ -1134,6 +1134,30 @@ def _merge_ocr_layer(
     return output_pdf
 
 
+def _merge_ocr_layer_doc(
+    original_pdf: Path,
+    ocr_doc: fitz.Document,
+    output_pdf: Path,
+) -> Path:
+    orig = fitz.open(original_pdf)
+    out = fitz.open()
+    try:
+        _strip_images_inplace(ocr_doc)
+        page_count = min(len(orig), len(ocr_doc))
+        for i in range(page_count):
+            orig_page = orig.load_page(i)
+            rect = orig_page.rect
+            new_page = out.new_page(width=rect.width, height=rect.height)
+            new_page.show_pdf_page(rect, orig, i)
+            new_page.show_pdf_page(rect, ocr_doc, i, overlay=True)
+        output_pdf.parent.mkdir(parents=True, exist_ok=True)
+        out.save(output_pdf)
+    finally:
+        out.close()
+        orig.close()
+    return output_pdf
+
+
 def _extract_ocr_layer_pdf(
     input_pdf: Path,
     output_pdf: Path,
@@ -1146,6 +1170,12 @@ def _extract_ocr_layer_pdf(
     finally:
         doc.close()
     return output_pdf
+
+
+def _extract_ocr_layer_doc(input_pdf: Path) -> fitz.Document:
+    doc = fitz.open(input_pdf)
+    _strip_images_inplace(doc)
+    return doc
 
 
 def _insert_invisible_words(page: fitz.Page, words: list[tuple]) -> None:
@@ -1915,6 +1945,8 @@ def run_ocr(
     stamp_rect_aspect_min: float | None = None,
     stamp_rect_aspect_max: float | None = None,
     signature_region: float | None = None,
+    tmp_dir: Path | str | None = None,
+    out_dir: Path | str | None = None,
 ) -> dict:
     mode = mode or DEFAULT_MODE
     lang = lang or DEFAULT_LANG
@@ -1946,8 +1978,8 @@ def run_ocr(
         DEFAULT_SIGNATURE_REGION if signature_region is None else signature_region
     )
 
-    tmp_dir = Path(DEFAULT_TMP_DIR)
-    out_dir = Path(DEFAULT_OUT_DIR)
+    tmp_dir = Path(tmp_dir) if tmp_dir is not None else Path(DEFAULT_TMP_DIR)
+    out_dir = Path(out_dir) if out_dir is not None else Path(DEFAULT_OUT_DIR)
     tmp_dir.mkdir(parents=True, exist_ok=True)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2094,6 +2126,44 @@ def run_ocr(
         paddle_masked_searchable_pdf = None
         paddle_searchable_pdf = None
         text = _extract_text(out_pdf)
+    elif mode == "searchable_conservative_service":
+        out_pdf = out_dir / f"{token}_searchable.pdf"
+        working_pdf = out_dir / f"{token}_working.pdf"
+        working_searchable_pdf = out_dir / f"{token}_working_searchable.pdf"
+        allowed_all = set(DEFAULT_MASK_DETECTOR_CLASSES) if DEFAULT_MASK_DETECTOR_CLASSES else None
+        allowed_round = {"sello_redondo"}
+        if allowed_all is not None:
+            allowed_round = allowed_round & allowed_all
+        _prepare_conservative_working_pdf(
+            src_pdf,
+            working_pdf,
+            conf=DEFAULT_MASK_DETECTOR_CONF,
+            imgsz=DEFAULT_MASK_DETECTOR_IMGSZ,
+            allowed_classes=allowed_round or None,
+            grayscale=mask_grayscale,
+            detected_pdf=None,
+        )
+        _ocr_searchable_cpu(
+            working_pdf,
+            working_searchable_pdf,
+            lang,
+            deskew=deskew,
+            clean=clean,
+            remove_vectors=remove_vectors,
+            psm=psm,
+            jobs=jobs,
+        )
+        ocr_layer_doc = _extract_ocr_layer_doc(working_searchable_pdf)
+        try:
+            _merge_ocr_layer_doc(src_pdf, ocr_layer_doc, out_pdf)
+        finally:
+            ocr_layer_doc.close()
+        masked_pdf = working_pdf
+        masked_searchable_pdf = None
+        detected_pdf = None
+        paddle_masked_searchable_pdf = None
+        paddle_searchable_pdf = None
+        text = ""
     elif mode == "paddle_text":
         text, paddle_json, paddle_text = _ocr_paddle_text(
             src_pdf,
@@ -2169,6 +2239,8 @@ def run_ocr_file(
     stamp_rect_aspect_min: float | None = None,
     stamp_rect_aspect_max: float | None = None,
     signature_region: float | None = None,
+    tmp_dir: Path | str | None = None,
+    out_dir: Path | str | None = None,
 ) -> dict:
     mode = mode or DEFAULT_MODE
     lang = lang or DEFAULT_LANG
@@ -2200,8 +2272,8 @@ def run_ocr_file(
         DEFAULT_SIGNATURE_REGION if signature_region is None else signature_region
     )
 
-    tmp_dir = Path(DEFAULT_TMP_DIR)
-    out_dir = Path(DEFAULT_OUT_DIR)
+    tmp_dir = Path(tmp_dir) if tmp_dir is not None else Path(DEFAULT_TMP_DIR)
+    out_dir = Path(out_dir) if out_dir is not None else Path(DEFAULT_OUT_DIR)
     tmp_dir.mkdir(parents=True, exist_ok=True)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2347,6 +2419,44 @@ def run_ocr_file(
         paddle_masked_searchable_pdf = None
         paddle_searchable_pdf = None
         text = _extract_text(out_pdf)
+    elif mode == "searchable_conservative_service":
+        out_pdf = out_dir / f"{token}_searchable.pdf"
+        working_pdf = out_dir / f"{token}_working.pdf"
+        working_searchable_pdf = out_dir / f"{token}_working_searchable.pdf"
+        allowed_all = set(DEFAULT_MASK_DETECTOR_CLASSES) if DEFAULT_MASK_DETECTOR_CLASSES else None
+        allowed_round = {"sello_redondo"}
+        if allowed_all is not None:
+            allowed_round = allowed_round & allowed_all
+        _prepare_conservative_working_pdf(
+            src_pdf,
+            working_pdf,
+            conf=DEFAULT_MASK_DETECTOR_CONF,
+            imgsz=DEFAULT_MASK_DETECTOR_IMGSZ,
+            allowed_classes=allowed_round or None,
+            grayscale=mask_grayscale,
+            detected_pdf=None,
+        )
+        _ocr_searchable_cpu(
+            working_pdf,
+            working_searchable_pdf,
+            lang,
+            deskew=deskew,
+            clean=clean,
+            remove_vectors=remove_vectors,
+            psm=psm,
+            jobs=jobs,
+        )
+        ocr_layer_doc = _extract_ocr_layer_doc(working_searchable_pdf)
+        try:
+            _merge_ocr_layer_doc(src_pdf, ocr_layer_doc, out_pdf)
+        finally:
+            ocr_layer_doc.close()
+        masked_pdf = working_pdf
+        masked_searchable_pdf = None
+        detected_pdf = None
+        paddle_masked_searchable_pdf = None
+        paddle_searchable_pdf = None
+        text = ""
     elif mode == "paddle_text":
         text, paddle_json, paddle_text = _ocr_paddle_text(
             src_pdf,

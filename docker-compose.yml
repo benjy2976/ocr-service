@@ -1,5 +1,10 @@
 services:
-  ocr-service:
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # ocr-api: API HTTP on-demand (FastAPI)
+  # Puerto externo: 18010 → interno: 8000
+  # ─────────────────────────────────────────────────────────────────────────────
+  ocr-api:
     build: .
     shm_size: "8gb"
     ports:
@@ -10,14 +15,18 @@ services:
           devices:
             - capabilities: [gpu]
     environment:
+      # ── Directorios ──────────────────────────────────────────────────────────
       OCR_TMP_DIR: /data/tmp
       OCR_OUT_DIR: /data/out
+      # ── OCR ─────────────────────────────────────────────────────────────────
       OCR_LANG: spa
       OCR_MODE: searchable_cpu
+      # ── App ─────────────────────────────────────────────────────────────────
       REVIEW_APP_VERSION: "1.2"
       CLASSIFY_DIR: /data/classify
       CLASSIFY_CONF_THRESHOLD: "0.99"
       STAMP_MODEL_PATH: /data/models/stamp_detector_v2.pt
+      # ── GPU ─────────────────────────────────────────────────────────────────
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
     volumes:
@@ -26,6 +35,49 @@ services:
       - ./scripts:/app/scripts:ro
     networks:
       - grh_network
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # ocr-worker: consumidor activo de la cola OCR de Munis
+  # Sin puertos expuestos — proceso interno de polling
+  # ─────────────────────────────────────────────────────────────────────────────
+  ocr-worker:
+    build: .
+    shm_size: "8gb"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    environment:
+      # ── Directorios ──────────────────────────────────────────────────────────
+      OCR_TMP_DIR: /data/tmp
+      OCR_OUT_DIR: /data/out
+      # ── OCR ─────────────────────────────────────────────────────────────────
+      OCR_LANG: spa
+      OCR_MODE: searchable_cpu
+      STAMP_MODEL_PATH: /data/models/stamp_detector_v2.pt
+      # ── GPU ─────────────────────────────────────────────────────────────────
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      # ── Munis / Worker ───────────────────────────────────────────────────────
+      # OBLIGATORIO: definir en .env o en el entorno antes de levantar
+      MUNIS_BASE_URL: ${MUNIS_BASE_URL:-}
+      MUNIS_OCR_TOKEN: ${MUNIS_OCR_TOKEN:-}
+      OCR_WORKER_NAME: ${OCR_WORKER_NAME:-ocr-worker-1}
+      OCR_POLL_INTERVAL_SECONDS: ${OCR_POLL_INTERVAL_SECONDS:-10}
+      OCR_WORKER_ENABLED: ${OCR_WORKER_ENABLED:-true}
+      OCR_CALLBACK_TIMEOUT_SECONDS: ${OCR_CALLBACK_TIMEOUT_SECONDS:-30}
+      OCR_DOWNLOAD_TIMEOUT_SECONDS: ${OCR_DOWNLOAD_TIMEOUT_SECONDS:-120}
+      OCR_WORKER_MAX_CONSECUTIVE_ERRORS: ${OCR_WORKER_MAX_CONSECUTIVE_ERRORS:-20}
+      OCR_WORKER_LOG_LEVEL: ${OCR_WORKER_LOG_LEVEL:-INFO}
+    volumes:
+      - ./data:/data
+      - ./app:/app/app
+    networks:
+      - grh_network
+    command: ["python3", "-m", "app.worker_main"]
+    restart: unless-stopped
 
 networks:
   grh_network:

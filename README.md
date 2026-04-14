@@ -77,6 +77,80 @@ Estado actual de listas:
 - GET /file/{filename}
   Descarga el PDF con OCR aplicado.
 
+---
+
+## Integración Munis — ocr-worker
+
+Este repo expone dos servicios Docker desde el mismo código base:
+
+### ocr-api
+API HTTP on-demand. Mismo comportamiento de siempre.
+
+```bash
+docker compose up ocr-api
+```
+
+### ocr-worker
+Consumidor activo de la cola OCR de Normatividad en Munis.
+Hace polling continuo, descarga PDFs, aplica OCR y reporta el resultado.
+
+```bash
+# Variables obligatorias antes de levantar:
+export MUNIS_BASE_URL=http://munis:8000
+export MUNIS_OCR_TOKEN=<token>
+
+docker compose up ocr-worker
+```
+
+### Levantar ambos servicios
+
+```bash
+cp .env.example .env
+# editar .env con los valores reales
+docker compose up --build
+```
+
+### Variables de entorno del worker
+
+| Variable                          | Default        | Descripción |
+|-----------------------------------|---------------|-------------|
+| MUNIS_BASE_URL                    | (obligatorio) | URL base de Munis |
+| MUNIS_OCR_TOKEN                   | (obligatorio) | Bearer token de autenticación |
+| OCR_WORKER_NAME                   | ocr-worker-1  | Nombre del worker en logs |
+| OCR_POLL_INTERVAL_SECONDS         | 10            | Segundos entre polls si la cola está vacía |
+| OCR_WORKER_ENABLED                | true          | Poner "false" para deshabilitar sin borrar el contenedor |
+| OCR_CALLBACK_TIMEOUT_SECONDS      | 30            | Timeout HTTP para callbacks a Munis |
+| OCR_DOWNLOAD_TIMEOUT_SECONDS      | 120           | Timeout HTTP para descarga del PDF fuente |
+| OCR_WORKER_MAX_CONSECUTIVE_ERRORS | 20            | Errores seguidos antes de detener el proceso |
+| OCR_WORKER_LOG_LEVEL              | INFO          | Nivel de log (DEBUG/INFO/WARNING/ERROR) |
+
+### Flujo del worker
+
+```
+pull-next (POST) → 204 → esperar → reintentar
+                 → item → mark_processing (POST)
+                        → download source (GET)
+                        → OCR local
+                        → complete (POST, multipart)   ← OK
+                        → fail    (POST, JSON)         ← error
+```
+
+### Configuración necesaria en Munis
+
+1. Crear el token OCR y configurarlo en Munis como token válido para el servicio OCR.
+2. (Opcional) Whitelist la IP del contenedor ocr-worker si Munis lo requiere.
+3. Exponer los endpoints del grupo `/api/ocr/normatividad/queue/*` accesibles desde la red del worker.
+4. Asegurarse de que `grh_network` es la misma red Docker que usa Munis (o ajustar la red en docker-compose.yml).
+
+### Archivos nuevos
+
+| Archivo                  | Descripción |
+|--------------------------|-------------|
+| app/munis_client.py      | Cliente HTTP para los endpoints de Munis |
+| app/worker.py            | Loop de polling y lógica del worker |
+| worker_entrypoint.py     | Entry point del contenedor ocr-worker |
+| .env.example             | Plantilla de variables de entorno |
+
 - POST /ocr/local
   Procesa un PDF que ya existe en el filesystem del contenedor.
 
