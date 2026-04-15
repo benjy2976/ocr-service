@@ -7,8 +7,9 @@ Flujo por iteración:
   3. Trabajo disponible:
        a. mark_processing()  → notifica inicio
        b. download_source()  → descarga PDF original
-       c. run_ocr_file()     → aplica OCR (lógica existente)
-       d. complete()         → sube PDF resultado
+       c. preflight()        → clasifica si requiere OCR
+       d. run_ocr_file()     → aplica OCR solo cuando aporta valor real
+       e. complete()         → sube PDF resultado
   4. Cualquier error       → fail() + esperar
 
 Variables de entorno relevantes:
@@ -37,6 +38,7 @@ from pathlib import Path
 
 from app import munis_client
 from app.ocr_pipeline import run_ocr_file
+from app.preflight import inspect_pdf
 
 # ---------------------------------------------------------------------------
 # Configuración del worker
@@ -124,7 +126,72 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
         munis_client.download_source(queue_id, src_pdf)
         worker_logger.info("PDF descargado: %s (%d bytes)", src_pdf, src_pdf.stat().st_size)
 
-        result = run_ocr_file(src_pdf, tmp_dir=TMP_DIR, out_dir=OUT_DIR)
+        preflight = inspect_pdf(src_pdf)
+        worker_logger.info(
+            "Preflight queue_id=%s | class=%s decision=%s signed=%s useful_text=%s",
+            queue_id,
+            preflight.get("classification"),
+            preflight.get("decision"),
+            preflight.get("signed"),
+            preflight.get("has_useful_text"),
+        )
+
+        elapsed_ms = int((time.monotonic() - start_time) * 1000)
+        if preflight["decision"] == "skip":
+            munis_client.skip(
+                queue_id,
+                message=preflight["message"],
+                reason_code=preflight.get("reason_code"),
+                duration_ms=elapsed_ms,
+                preflight=preflight,
+            )
+            worker_logger.info(
+                "queue_id=%s omitido por preflight | reason=%s",
+                queue_id,
+                preflight.get("reason_code"),
+            )
+            return
+
+        if preflight["decision"] == "block":
+            munis_client.block(
+                queue_id,
+                message=preflight["message"],
+                reason_code=preflight.get("reason_code"),
+                duration_ms=elapsed_ms,
+                preflight=preflight,
+            )
+            worker_logger.info(
+                "queue_id=%s bloqueado por preflight | reason=%s",
+                queue_id,
+                preflight.get("reason_code"),
+            )
+            return
+
+        try:
+            result = run_ocr_file(src_pdf, tmp_dir=TMP_DIR, out_dir=OUT_DIR)
+        except Exception as exc:
+            if _looks_like_signature_error(exc):
+                elapsed_ms = int((time.monotonic() - start_time) * 1000)
+                fallback_preflight = {
+                    **preflight,
+                    "decision": "block",
+                    "reason_code": "digital_signature_detected_during_ocr",
+                    "message": "OCR bloqueado por firma digital detectada durante el procesamiento",
+                }
+                munis_client.block(
+                    queue_id,
+                    message=fallback_preflight["message"],
+                    reason_code=fallback_preflight["reason_code"],
+                    duration_ms=elapsed_ms,
+                    preflight=fallback_preflight,
+                )
+                worker_logger.warning(
+                    "queue_id=%s bloqueado por firma detectada durante OCR",
+                    queue_id,
+                )
+                return
+            raise
+
         generated_paths = _result_artifact_paths(result)
 
         out_pdf = result.get("output_pdf")
@@ -154,6 +221,11 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
 def _safe_meta(item: dict) -> str:
     keys = ("queue_id", "id", "status", "regulation_file_id", "lease_expires_at")
     return str({k: item[k] for k in keys if k in item})
+
+
+def _looks_like_signature_error(exc: Exception) -> bool:
+    text = f"{exc.__class__.__name__}: {exc}".lower()
+    return "digitalsignatureerror" in text or "digital signature" in text
 
 
 def _result_artifact_paths(result: dict) -> list[Path]:

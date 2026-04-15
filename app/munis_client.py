@@ -22,6 +22,7 @@ Catálogo regulation_file_ocrs.status
 import logging
 import os
 import time
+import json
 from pathlib import Path
 
 import requests
@@ -61,6 +62,8 @@ QUEUE_STATUS: dict[int, str] = {
     4: "failed",
     5: "obsolete",
     6: "cancelled",
+    7: "skipped",
+    8: "blocked",
 }
 
 # regulation_file_ocrs.status
@@ -73,6 +76,7 @@ FILE_OCR_STATUS: dict[int, str] = {
     5: "failed",
     6: "obsolete",
     7: "skipped",
+    8: "blocked",
 }
 
 
@@ -406,6 +410,92 @@ def fail(queue_id: int | str, reason: str, duration_ms: int | None = None) -> No
             )
     except Exception:
         pass
+
+
+def skip(
+    queue_id: int | str,
+    *,
+    message: str,
+    reason_code: str | None = None,
+    duration_ms: int | None = None,
+    preflight: dict | None = None,
+) -> dict:
+    return _post_business_outcome(
+        queue_id,
+        outcome="skip",
+        message=message,
+        reason_code=reason_code,
+        duration_ms=duration_ms,
+        preflight=preflight,
+    )
+
+
+def block(
+    queue_id: int | str,
+    *,
+    message: str,
+    reason_code: str | None = None,
+    duration_ms: int | None = None,
+    preflight: dict | None = None,
+) -> dict:
+    return _post_business_outcome(
+        queue_id,
+        outcome="block",
+        message=message,
+        reason_code=reason_code,
+        duration_ms=duration_ms,
+        preflight=preflight,
+    )
+
+
+def _post_business_outcome(
+    queue_id: int | str,
+    *,
+    outcome: str,
+    message: str,
+    reason_code: str | None,
+    duration_ms: int | None,
+    preflight: dict | None,
+) -> dict:
+    url = _url(f"/api/ocr/normatividad/queue/{queue_id}/{outcome}")
+    body: dict = {"message": message}
+    if reason_code:
+        body["reason_code"] = reason_code
+    if duration_ms is not None:
+        body["duration_ms"] = duration_ms
+    if preflight is not None:
+        body["response_payload_json"] = {
+            "decision": outcome,
+            "reason_code": reason_code,
+            "preflight": preflight,
+        }
+        body["engine_response_json"] = {
+            "decision": outcome,
+            "reason_code": reason_code,
+            "preflight": preflight,
+        }
+
+    _dbg("POST", url, body=json.dumps(body, ensure_ascii=False)[:1200])
+    resp = _request_with_retry(
+        lambda: requests.post(url, headers=_headers(), json=body, timeout=OCR_CALLBACK_TIMEOUT),
+        method="POST",
+        url=url,
+        timeout_label="callback",
+    )
+    _dbg("POST", url, resp.status_code, resp.text)
+    resp.raise_for_status()
+
+    result = resp.json()
+    if "data" in result and isinstance(result["data"], dict):
+        result["data"] = normalize_payload(result["data"], FILE_OCR_STATUS)
+    logger.info(
+        "%s registrado queue_id=%s | status=%s | reason_code=%s",
+        outcome,
+        queue_id,
+        result.get("data", {}).get("status"),
+        reason_code,
+    )
+    return result
 
 
 def fetch_status() -> dict | None:
