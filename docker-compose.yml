@@ -31,6 +31,7 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
     volumes:
       - ./data:/data
+      - ocr_nfs_cache:/nfs-cache
       - ./app:/app/app
       - ./scripts:/app/scripts:ro
     networks:
@@ -74,11 +75,20 @@ services:
       OCR_WORKER_LOG_LEVEL: ${OCR_WORKER_LOG_LEVEL:-INFO}
     volumes:
       - ./data:/data
+      - ocr_nfs_cache:/nfs-cache
       - ./app:/app/app
     networks:
       - grh_network
     command: ["python3", "-m", "app.worker_main"]
     restart: unless-stopped
+
+volumes:
+  ocr_nfs_cache:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: addr=127.0.0.1,rw,nfsvers=4,soft,timeo=180
+      device: :/exports/ocr-cache
 
 networks:
   grh_network:
