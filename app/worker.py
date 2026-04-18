@@ -31,6 +31,7 @@ import logging
 import multiprocessing as mp
 import os
 import signal
+import shutil
 import sys
 import time
 import uuid
@@ -56,6 +57,7 @@ MAX_CONSECUTIVE_ERRORS: int = int(os.getenv("OCR_WORKER_MAX_CONSECUTIVE_ERRORS",
 
 TMP_DIR = Path(os.getenv("OCR_TMP_DIR", "/data/tmp"))
 OUT_DIR = Path(os.getenv("OCR_OUT_DIR", "/data/out"))
+SHARED_CACHE_DIR = Path(os.getenv("OCR_SHARED_CACHE_DIR", "/nfs-cache"))
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -115,7 +117,30 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
 
     worker_logger.info("Iniciando procesamiento queue_id=%s | meta=%s", queue_id, _safe_meta(payload))
 
+    requested_artifacts = _requested_artifacts(payload)
+    expected_artifacts = _expected_artifacts(payload)
+
     munis_client.mark_processing(queue_id, worker_name=worker_name)
+
+    if not requested_artifacts.get("pdf", False):
+        worker_logger.info(
+            "queue_id=%s omitido: la cola no solicita artefacto pdf | requested=%s",
+            queue_id,
+            requested_artifacts,
+        )
+        munis_client.skip(
+            queue_id,
+            message="Cola omitida: este worker solo atiende artefactos PDF",
+            reason_code="pdf_not_requested",
+            duration_ms=0,
+            preflight={
+                "decision": "skip",
+                "reason_code": "pdf_not_requested",
+                "requested_artifacts": requested_artifacts,
+                "expected_artifacts": expected_artifacts,
+            },
+        )
+        return
 
     token = uuid.uuid4().hex[:12]
     src_pdf = TMP_DIR / f"munis_{queue_id}_{token}.pdf"
@@ -210,8 +235,55 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
             elapsed_ms,
         )
 
-        munis_client.complete(queue_id, out_pdf_path, duration_ms=elapsed_ms)
-        worker_logger.info("Item queue_id=%s completado exitosamente", queue_id)
+        shared_pdf_path = _resolve_expected_pdf_path(payload)
+        if shared_pdf_path is not None:
+            _publish_pdf_to_shared_cache(out_pdf_path, shared_pdf_path)
+            response_payload = {
+                "requested_artifacts": requested_artifacts,
+                "reported_artifacts": {"pdf": True},
+                "expected_artifacts": expected_artifacts,
+                "storage": {
+                    "shared_cache_dir": str(SHARED_CACHE_DIR),
+                    "pdf_path": expected_artifacts.get("pdf_path"),
+                    "resolved_pdf_path": str(shared_pdf_path),
+                },
+                "ocr": {
+                    "mode": result.get("mode"),
+                    "text_len": result.get("text_len"),
+                    "elapsed_sec": result.get("elapsed_sec"),
+                },
+            }
+            engine_response = {
+                "result": {
+                    "mode": result.get("mode"),
+                    "output_pdf": str(shared_pdf_path),
+                    "text_len": result.get("text_len"),
+                    "elapsed_sec": result.get("elapsed_sec"),
+                },
+                "source": payload.get("source") or {},
+                "document": payload.get("document") or {},
+                "artifacts": payload.get("artifacts") or {},
+            }
+            munis_client.report_artifacts(
+                queue_id,
+                processor=worker_name,
+                duration_ms=elapsed_ms,
+                finalize_queue=True,
+                artifacts={"pdf": True},
+                response_payload_json=response_payload,
+                engine_response_json=engine_response,
+            )
+            worker_logger.info(
+                "Item queue_id=%s reportado por /artifacts | pdf=%s",
+                queue_id,
+                shared_pdf_path,
+            )
+        else:
+            munis_client.complete(queue_id, out_pdf_path, duration_ms=elapsed_ms)
+            worker_logger.info(
+                "Item queue_id=%s completado por flujo legacy multipart",
+                queue_id,
+            )
         _cleanup(*generated_paths)
 
     except munis_client.QueueSourceUnavailableError as exc:
@@ -228,8 +300,58 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
 
 
 def _safe_meta(item: dict) -> str:
-    keys = ("queue_id", "id", "status", "regulation_file_id", "lease_expires_at")
-    return str({k: item[k] for k in keys if k in item})
+    meta = {k: item[k] for k in ("queue_id", "id", "status", "regulation_file_id", "lease_expires_at") if k in item}
+    artifacts = item.get("artifacts")
+    if isinstance(artifacts, dict):
+        requested = artifacts.get("requested")
+        expected = artifacts.get("expected")
+        if requested is not None:
+            meta["requested_artifacts"] = requested
+        if isinstance(expected, dict) and "dir" in expected:
+            meta["artifacts_dir"] = expected["dir"]
+    return str(meta)
+
+
+def _requested_artifacts(payload: dict) -> dict[str, bool]:
+    artifacts = payload.get("artifacts")
+    requested = artifacts.get("requested") if isinstance(artifacts, dict) else None
+    if not isinstance(requested, dict):
+        return {"pdf": True, "txt": False, "md": False}
+    return {
+        "pdf": bool(requested.get("pdf")),
+        "txt": bool(requested.get("txt")),
+        "md": bool(requested.get("md")),
+    }
+
+
+def _expected_artifacts(payload: dict) -> dict:
+    artifacts = payload.get("artifacts")
+    expected = artifacts.get("expected") if isinstance(artifacts, dict) else None
+    return expected if isinstance(expected, dict) else {}
+
+
+def _resolve_expected_pdf_path(payload: dict) -> Path | None:
+    expected = _expected_artifacts(payload)
+    raw = expected.get("pdf_path")
+    if not raw:
+        return None
+    relative = Path(str(raw))
+    if relative.is_absolute():
+        raise RuntimeError(f"expected pdf_path debe ser relativo al cache compartido: {raw}")
+    candidate = (SHARED_CACHE_DIR / relative).resolve()
+    shared_root = SHARED_CACHE_DIR.resolve()
+    try:
+        candidate.relative_to(shared_root)
+    except ValueError as exc:
+        raise RuntimeError(f"expected pdf_path fuera del cache compartido: {raw}") from exc
+    return candidate
+
+
+def _publish_pdf_to_shared_cache(src_pdf: Path, target_pdf: Path) -> None:
+    target_pdf.parent.mkdir(parents=True, exist_ok=True)
+    tmp_target = target_pdf.with_suffix(f"{target_pdf.suffix}.tmp")
+    shutil.copy2(src_pdf, tmp_target)
+    os.replace(tmp_target, target_pdf)
 
 
 def _looks_like_signature_error(exc: Exception) -> bool:

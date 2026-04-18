@@ -385,6 +385,57 @@ def complete(queue_id: int | str, pdf_path: Path, duration_ms: int | None = None
     return result
 
 
+def report_artifacts(
+    queue_id: int | str,
+    *,
+    processor: str,
+    artifacts: dict[str, bool],
+    finalize_queue: bool,
+    duration_ms: int | None = None,
+    response_payload_json: dict | None = None,
+    engine_response_json: dict | None = None,
+) -> dict:
+    """
+    POST /api/ocr/normatividad/queue/{queue_id}/artifacts  (JSON)
+
+    Reporta qué artefactos ya quedaron disponibles en el storage compartido.
+    """
+    url = _url(f"/api/ocr/normatividad/queue/{queue_id}/artifacts")
+    body: dict = {
+        "processor": processor,
+        "finalize_queue": bool(finalize_queue),
+        "artifacts": dict(artifacts),
+    }
+    if duration_ms is not None:
+        body["duration_ms"] = duration_ms
+    if response_payload_json is not None:
+        body["response_payload_json"] = response_payload_json
+    if engine_response_json is not None:
+        body["engine_response_json"] = engine_response_json
+
+    _dbg("POST", url, body=json.dumps(body, ensure_ascii=False)[:1200])
+    resp = _request_with_retry(
+        lambda: requests.post(url, headers=_headers(), json=body, timeout=OCR_CALLBACK_TIMEOUT),
+        method="POST",
+        url=url,
+        timeout_label="callback",
+    )
+    _dbg("POST", url, resp.status_code, resp.text)
+    resp.raise_for_status()
+
+    result = resp.json()
+    if "data" in result and isinstance(result["data"], dict):
+        result["data"] = normalize_payload(result["data"], QUEUE_STATUS)
+    logger.info(
+        "artifacts report OK queue_id=%s | status=%s | artifacts=%s finalize=%s",
+        queue_id,
+        result.get("data", {}).get("status"),
+        artifacts,
+        finalize_queue,
+    )
+    return result
+
+
 def fail(queue_id: int | str, reason: str, duration_ms: int | None = None) -> None:
     """
     POST /api/ocr/normatividad/queue/{queue_id}/fail  (JSON)
