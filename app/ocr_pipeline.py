@@ -2032,16 +2032,6 @@ def run_ocr(
                 jobs=jobs,
             )
             paddle_masked_searchable_pdf = None
-            try:
-                paddle_masked_searchable_pdf = out_dir / f"{token}_paddle_masked_searchable.pdf"
-                _paddle_masked_searchable_pdf(
-                    masked_pdf,
-                    paddle_masked_searchable_pdf,
-                    dpi=DEFAULT_PADDLE_DPI,
-                    lang=DEFAULT_PADDLE_LANG,
-                )
-            except Exception:
-                paddle_masked_searchable_pdf = None
             _merge_ocr_layer(src_pdf, masked_searchable_pdf, out_pdf)
         else:
             _ocr_searchable_cpu(
@@ -2055,16 +2045,6 @@ def run_ocr(
                 jobs=jobs,
             )
         paddle_searchable_pdf = None
-        try:
-            paddle_searchable_pdf = out_dir / f"{token}_paddle_searchable.pdf"
-            _paddle_searchable_from_pdf(
-                src_pdf,
-                paddle_searchable_pdf,
-                dpi=DEFAULT_PADDLE_DPI,
-                lang=DEFAULT_PADDLE_LANG,
-            )
-        except Exception:
-            paddle_searchable_pdf = None
         text = _extract_text(out_pdf)
     elif mode == "searchable_conservative":
         out_pdf = out_dir / f"{token}_searchable.pdf"
@@ -2325,16 +2305,6 @@ def run_ocr_file(
                 jobs=jobs,
             )
             paddle_masked_searchable_pdf = None
-            try:
-                paddle_masked_searchable_pdf = out_dir / f"{token}_paddle_masked_searchable.pdf"
-                _paddle_masked_searchable_pdf(
-                    masked_pdf,
-                    paddle_masked_searchable_pdf,
-                    dpi=DEFAULT_PADDLE_DPI,
-                    lang=DEFAULT_PADDLE_LANG,
-                )
-            except Exception:
-                paddle_masked_searchable_pdf = None
             _merge_ocr_layer(src_pdf, masked_searchable_pdf, out_pdf)
         else:
             _ocr_searchable_cpu(
@@ -2348,16 +2318,6 @@ def run_ocr_file(
                 jobs=jobs,
             )
         paddle_searchable_pdf = None
-        try:
-            paddle_searchable_pdf = out_dir / f"{token}_paddle_searchable.pdf"
-            _paddle_searchable_from_pdf(
-                src_pdf,
-                paddle_searchable_pdf,
-                dpi=DEFAULT_PADDLE_DPI,
-                lang=DEFAULT_PADDLE_LANG,
-            )
-        except Exception:
-            paddle_searchable_pdf = None
         text = _extract_text(out_pdf)
     elif mode == "searchable_conservative":
         out_pdf = out_dir / f"{token}_searchable.pdf"

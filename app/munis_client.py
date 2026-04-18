@@ -29,6 +29,15 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+
+class QueueSourceUnavailableError(RuntimeError):
+    """El item de cola no tiene archivo fuente disponible para descargar."""
+
+    def __init__(self, queue_id: int | str, message: str = "Archivo fuente no disponible"):
+        self.queue_id = queue_id
+        self.message = message
+        super().__init__(f"queue_id={queue_id}: {message}")
+
 # ---------------------------------------------------------------------------
 # Configuración
 # ---------------------------------------------------------------------------
@@ -310,6 +319,15 @@ def download_source(queue_id: int | str, dest_path: Path) -> None:
             f"Content-Type: {resp.headers.get('Content-Type')} | "
             f"Content-Length: {resp.headers.get('Content-Length')}",
         )
+        if resp.status_code == 404:
+            message = "Archivo fuente no disponible"
+            try:
+                payload = resp.json()
+                if isinstance(payload, dict) and payload.get("message"):
+                    message = str(payload["message"])
+            except ValueError:
+                pass
+            raise QueueSourceUnavailableError(queue_id, message)
         resp.raise_for_status()
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         with open(dest_path, "wb") as fh:

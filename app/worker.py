@@ -214,6 +214,15 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
         worker_logger.info("Item queue_id=%s completado exitosamente", queue_id)
         _cleanup(*generated_paths)
 
+    except munis_client.QueueSourceUnavailableError as exc:
+        elapsed_ms = int((time.monotonic() - start_time) * 1000)
+        worker_logger.warning(
+            "queue_id=%s sin archivo fuente disponible: %s",
+            queue_id,
+            exc.message,
+        )
+        munis_client.fail(queue_id, exc.message, duration_ms=elapsed_ms)
+
     finally:
         _cleanup(src_pdf)
 

@@ -87,8 +87,8 @@ volumes:
     driver: local
     driver_opts:
       type: nfs
-      o: addr=127.0.0.1,rw,nfsvers=4,soft,timeo=180
-      device: :/exports/ocr-cache
+      o: addr=10.0.0.102,nolock,soft,rw
+      device: :/nfs/ocr
 
 networks:
   grh_network:
