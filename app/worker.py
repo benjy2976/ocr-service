@@ -38,7 +38,7 @@ import uuid
 from pathlib import Path
 
 from app import munis_client
-from app.ocr_pipeline import run_ocr_file
+from app.ocr_pipeline import _extract_text, run_ocr_file
 from app.preflight import inspect_pdf
 
 # ---------------------------------------------------------------------------
@@ -58,6 +58,7 @@ MAX_CONSECUTIVE_ERRORS: int = int(os.getenv("OCR_WORKER_MAX_CONSECUTIVE_ERRORS",
 TMP_DIR = Path(os.getenv("OCR_TMP_DIR", "/data/tmp"))
 OUT_DIR = Path(os.getenv("OCR_OUT_DIR", "/data/out"))
 SHARED_CACHE_DIR = Path(os.getenv("OCR_SHARED_CACHE_DIR", "/nfs-cache"))
+SUPPORTED_ARTIFACTS = {"pdf": True, "txt": True, "md": False}
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -119,170 +120,248 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
 
     requested_artifacts = _requested_artifacts(payload)
     expected_artifacts = _expected_artifacts(payload)
+    unsupported_artifacts = {
+        name: True
+        for name, requested in requested_artifacts.items()
+        if requested and not SUPPORTED_ARTIFACTS.get(name, False)
+    }
+    planned_artifacts = {
+        name: True
+        for name, requested in requested_artifacts.items()
+        if requested and SUPPORTED_ARTIFACTS.get(name, False)
+    }
 
     munis_client.mark_processing(queue_id, worker_name=worker_name)
 
-    if not requested_artifacts.get("pdf", False):
+    if not planned_artifacts:
         worker_logger.info(
-            "queue_id=%s omitido: la cola no solicita artefacto pdf | requested=%s",
+            "queue_id=%s omitido: la cola no solicita artefactos soportados | requested=%s",
             queue_id,
             requested_artifacts,
         )
         munis_client.skip(
             queue_id,
-            message="Cola omitida: este worker solo atiende artefactos PDF",
-            reason_code="pdf_not_requested",
+            message="Cola omitida: este worker solo atiende artefactos PDF/TXT",
+            reason_code="no_supported_artifacts_requested",
             duration_ms=0,
             preflight={
                 "decision": "skip",
-                "reason_code": "pdf_not_requested",
+                "reason_code": "no_supported_artifacts_requested",
                 "requested_artifacts": requested_artifacts,
+                "unsupported_artifacts": unsupported_artifacts,
                 "expected_artifacts": expected_artifacts,
             },
         )
         return
 
+    start_time = time.monotonic()
     token = uuid.uuid4().hex[:12]
     src_pdf = TMP_DIR / f"munis_{queue_id}_{token}.pdf"
-    start_time = time.monotonic()
     generated_paths: list[Path] = []
+    produced_artifacts: dict[str, bool] = {}
+    reportable_artifacts: dict[str, bool] = {}
+    shared_pdf_path = _resolve_expected_artifact_path(payload, "pdf")
+    shared_txt_path = _resolve_expected_artifact_path(payload, "txt")
+    pdf_cached = _artifact_cached(payload, "pdf", shared_pdf_path)
+    txt_cached = _artifact_cached(payload, "txt", shared_txt_path)
+    base_pdf_path: Path | None = shared_pdf_path if pdf_cached else None
+    result: dict | None = None
 
     try:
-        munis_client.download_source(queue_id, src_pdf)
-        worker_logger.info("PDF descargado: %s (%d bytes)", src_pdf, src_pdf.stat().st_size)
+        needs_base_pdf = bool(planned_artifacts.get("pdf") or planned_artifacts.get("txt"))
+        if needs_base_pdf and not pdf_cached:
+            munis_client.download_source(queue_id, src_pdf)
+            worker_logger.info("PDF descargado: %s (%d bytes)", src_pdf, src_pdf.stat().st_size)
 
-        preflight = inspect_pdf(src_pdf)
-        worker_logger.info(
-            "Preflight queue_id=%s | class=%s decision=%s signed=%s useful_text=%s",
-            queue_id,
-            preflight.get("classification"),
-            preflight.get("decision"),
-            preflight.get("signed"),
-            preflight.get("has_useful_text"),
-        )
-
-        elapsed_ms = int((time.monotonic() - start_time) * 1000)
-        if preflight["decision"] == "skip":
-            munis_client.skip(
-                queue_id,
-                message=preflight["message"],
-                reason_code=preflight.get("reason_code"),
-                duration_ms=elapsed_ms,
-                preflight=preflight,
-            )
+            preflight = inspect_pdf(src_pdf)
             worker_logger.info(
-                "queue_id=%s omitido por preflight | reason=%s",
+                "Preflight queue_id=%s | class=%s decision=%s signed=%s useful_text=%s",
                 queue_id,
-                preflight.get("reason_code"),
+                preflight.get("classification"),
+                preflight.get("decision"),
+                preflight.get("signed"),
+                preflight.get("has_useful_text"),
             )
-            return
 
-        if preflight["decision"] == "block":
-            munis_client.block(
-                queue_id,
-                message=preflight["message"],
-                reason_code=preflight.get("reason_code"),
-                duration_ms=elapsed_ms,
-                preflight=preflight,
-            )
-            worker_logger.info(
-                "queue_id=%s bloqueado por preflight | reason=%s",
-                queue_id,
-                preflight.get("reason_code"),
-            )
-            return
-
-        try:
-            result = run_ocr_file(src_pdf, tmp_dir=TMP_DIR, out_dir=OUT_DIR)
-        except Exception as exc:
-            if _looks_like_signature_error(exc):
-                elapsed_ms = int((time.monotonic() - start_time) * 1000)
-                fallback_preflight = {
-                    **preflight,
-                    "decision": "block",
-                    "reason_code": "digital_signature_detected_during_ocr",
-                    "message": "OCR bloqueado por firma digital detectada durante el procesamiento",
-                }
-                munis_client.block(
+            elapsed_ms = int((time.monotonic() - start_time) * 1000)
+            if preflight["decision"] == "skip":
+                munis_client.skip(
                     queue_id,
-                    message=fallback_preflight["message"],
-                    reason_code=fallback_preflight["reason_code"],
+                    message=preflight["message"],
+                    reason_code=preflight.get("reason_code"),
                     duration_ms=elapsed_ms,
-                    preflight=fallback_preflight,
+                    preflight=preflight,
                 )
-                worker_logger.warning(
-                    "queue_id=%s bloqueado por firma detectada durante OCR",
+                worker_logger.info(
+                    "queue_id=%s omitido por preflight | reason=%s",
                     queue_id,
+                    preflight.get("reason_code"),
                 )
                 return
-            raise
 
-        generated_paths = _result_artifact_paths(result)
+            if preflight["decision"] == "block":
+                munis_client.block(
+                    queue_id,
+                    message=preflight["message"],
+                    reason_code=preflight.get("reason_code"),
+                    duration_ms=elapsed_ms,
+                    preflight=preflight,
+                )
+                worker_logger.info(
+                    "queue_id=%s bloqueado por preflight | reason=%s",
+                    queue_id,
+                    preflight.get("reason_code"),
+                )
+                return
 
-        out_pdf = result.get("output_pdf")
-        if not out_pdf:
-            raise RuntimeError(f"run_ocr_file no devolvió output_pdf. result={result}")
+            try:
+                result = run_ocr_file(src_pdf, tmp_dir=TMP_DIR, out_dir=OUT_DIR)
+            except Exception as exc:
+                if _looks_like_signature_error(exc):
+                    elapsed_ms = int((time.monotonic() - start_time) * 1000)
+                    fallback_preflight = {
+                        **preflight,
+                        "decision": "block",
+                        "reason_code": "digital_signature_detected_during_ocr",
+                        "message": "OCR bloqueado por firma digital detectada durante el procesamiento",
+                    }
+                    munis_client.block(
+                        queue_id,
+                        message=fallback_preflight["message"],
+                        reason_code=fallback_preflight["reason_code"],
+                        duration_ms=elapsed_ms,
+                        preflight=fallback_preflight,
+                    )
+                    worker_logger.warning(
+                        "queue_id=%s bloqueado por firma detectada durante OCR",
+                        queue_id,
+                    )
+                    return
+                raise
 
-        out_pdf_path = Path(out_pdf)
-        if not out_pdf_path.exists():
-            raise RuntimeError(f"output_pdf no existe en disco: {out_pdf_path}")
+            generated_paths = _result_artifact_paths(result)
+
+            out_pdf = result.get("output_pdf")
+            if not out_pdf:
+                raise RuntimeError(f"run_ocr_file no devolvió output_pdf. result={result}")
+
+            out_pdf_path = Path(out_pdf)
+            if not out_pdf_path.exists():
+                raise RuntimeError(f"output_pdf no existe en disco: {out_pdf_path}")
+
+            if shared_pdf_path is not None:
+                _publish_pdf_to_shared_cache(out_pdf_path, shared_pdf_path)
+                base_pdf_path = shared_pdf_path
+            else:
+                base_pdf_path = out_pdf_path
+            pdf_cached = True
+            produced_artifacts["pdf"] = True
+            worker_logger.info(
+                "OCR PDF base listo queue_id=%s | pdf=%s",
+                queue_id,
+                base_pdf_path,
+            )
+
+        if planned_artifacts.get("txt"):
+            if txt_cached and shared_txt_path is not None:
+                worker_logger.info(
+                    "TXT reutilizado desde cache queue_id=%s | txt=%s",
+                    queue_id,
+                    shared_txt_path,
+                )
+            else:
+                if base_pdf_path is None or not base_pdf_path.exists():
+                    raise RuntimeError(
+                        "No hay PDF base disponible para derivar TXT del cache OCR"
+                    )
+                if shared_txt_path is None:
+                    raise RuntimeError(
+                        "La cola solicita TXT pero artifacts.expected.txt_path no fue provisto"
+                    )
+                txt_content = _extract_text(base_pdf_path)
+                _publish_text_to_shared_cache(txt_content, shared_txt_path)
+                txt_cached = True
+                produced_artifacts["txt"] = True
+                worker_logger.info(
+                    "TXT generado queue_id=%s | txt=%s | text_len=%d",
+                    queue_id,
+                    shared_txt_path,
+                    len(txt_content),
+                )
+
+        if requested_artifacts.get("pdf") and pdf_cached:
+            reportable_artifacts["pdf"] = True
+        elif produced_artifacts.get("pdf"):
+            reportable_artifacts["pdf"] = True
+
+        if requested_artifacts.get("txt") and txt_cached:
+            reportable_artifacts["txt"] = True
 
         elapsed_ms = int((time.monotonic() - start_time) * 1000)
-        worker_logger.info(
-            "OCR completado queue_id=%s | text_len=%s duration=%dms",
-            queue_id,
-            result.get("text_len", "?"),
-            elapsed_ms,
-        )
+        response_payload = {
+            "requested_artifacts": requested_artifacts,
+            "planned_artifacts": planned_artifacts,
+            "unsupported_artifacts": unsupported_artifacts,
+            "produced_artifacts": produced_artifacts,
+            "reported_artifacts": reportable_artifacts,
+            "expected_artifacts": expected_artifacts,
+            "storage": {
+                "shared_cache_dir": str(SHARED_CACHE_DIR),
+                "resolved_pdf_path": str(base_pdf_path) if base_pdf_path else None,
+                "resolved_txt_path": str(shared_txt_path) if shared_txt_path else None,
+            },
+            "ocr": {
+                "mode": result.get("mode") if result else None,
+                "text_len": result.get("text_len") if result else None,
+                "elapsed_sec": result.get("elapsed_sec") if result else None,
+            },
+        }
+        engine_response = {
+            "result": {
+                "mode": result.get("mode") if result else None,
+                "output_pdf": str(base_pdf_path) if base_pdf_path else None,
+                "output_txt": str(shared_txt_path) if txt_cached and shared_txt_path else None,
+                "text_len": result.get("text_len") if result else None,
+                "elapsed_sec": result.get("elapsed_sec") if result else None,
+            },
+            "source": payload.get("source") or {},
+            "document": payload.get("document") or {},
+            "artifacts": payload.get("artifacts") or {},
+            "ocr_flags": _ocr_artifact_flags(payload),
+        }
 
-        shared_pdf_path = _resolve_expected_pdf_path(payload)
-        if shared_pdf_path is not None:
-            _publish_pdf_to_shared_cache(out_pdf_path, shared_pdf_path)
-            response_payload = {
-                "requested_artifacts": requested_artifacts,
-                "reported_artifacts": {"pdf": True},
-                "expected_artifacts": expected_artifacts,
-                "storage": {
-                    "shared_cache_dir": str(SHARED_CACHE_DIR),
-                    "pdf_path": expected_artifacts.get("pdf_path"),
-                    "resolved_pdf_path": str(shared_pdf_path),
-                },
-                "ocr": {
-                    "mode": result.get("mode"),
-                    "text_len": result.get("text_len"),
-                    "elapsed_sec": result.get("elapsed_sec"),
-                },
-            }
-            engine_response = {
-                "result": {
-                    "mode": result.get("mode"),
-                    "output_pdf": str(shared_pdf_path),
-                    "text_len": result.get("text_len"),
-                    "elapsed_sec": result.get("elapsed_sec"),
-                },
-                "source": payload.get("source") or {},
-                "document": payload.get("document") or {},
-                "artifacts": payload.get("artifacts") or {},
-            }
+        if expected_artifacts:
+            if reportable_artifacts.get("pdf") and shared_pdf_path is None:
+                raise RuntimeError(
+                    "La cola reporta pdf pero artifacts.expected.pdf_path no fue provisto"
+                )
+            if reportable_artifacts.get("txt") and shared_txt_path is None:
+                raise RuntimeError(
+                    "La cola reporta txt pero artifacts.expected.txt_path no fue provisto"
+                )
             munis_client.report_artifacts(
                 queue_id,
                 processor=worker_name,
                 duration_ms=elapsed_ms,
-                finalize_queue=True,
-                artifacts={"pdf": True},
+                finalize_queue=not unsupported_artifacts,
+                artifacts=reportable_artifacts,
                 response_payload_json=response_payload,
                 engine_response_json=engine_response,
             )
             worker_logger.info(
-                "Item queue_id=%s reportado por /artifacts | pdf=%s",
+                "Item queue_id=%s reportado por /artifacts | artifacts=%s",
                 queue_id,
-                shared_pdf_path,
+                reportable_artifacts,
             )
-        else:
-            munis_client.complete(queue_id, out_pdf_path, duration_ms=elapsed_ms)
+        elif produced_artifacts.get("pdf") and base_pdf_path is not None:
+            munis_client.complete(queue_id, base_pdf_path, duration_ms=elapsed_ms)
             worker_logger.info(
                 "Item queue_id=%s completado por flujo legacy multipart",
                 queue_id,
+            )
+        else:
+            raise RuntimeError(
+                "No hay artifacts.expected para reportar y no se produjo un PDF para fallback legacy"
             )
         _cleanup(*generated_paths)
 
@@ -330,20 +409,56 @@ def _expected_artifacts(payload: dict) -> dict:
     return expected if isinstance(expected, dict) else {}
 
 
-def _resolve_expected_pdf_path(payload: dict) -> Path | None:
+def _ocr_artifact_flags(payload: dict) -> dict[str, bool | None]:
+    candidates = []
+    for key in ("ocr", "ocr_record", "file_ocr"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            candidates.append(value)
+    candidates.append(payload)
+    for candidate in candidates:
+        flags = {}
+        found = False
+        for name in ("pdf", "txt", "md"):
+            key = f"has_{name}"
+            if key in candidate:
+                flags[name] = bool(candidate.get(key))
+                found = True
+            else:
+                flags[name] = None
+        if found:
+            return flags
+    return {"pdf": None, "txt": None, "md": None}
+
+
+def _artifact_cached(payload: dict, artifact: str, resolved_path: Path | None) -> bool:
+    flags = _ocr_artifact_flags(payload)
+    has_flag = flags.get(artifact)
+    if resolved_path is None:
+        return bool(has_flag)
+    if has_flag is False:
+        return False
+    return resolved_path.exists()
+
+
+def _resolve_expected_artifact_path(payload: dict, artifact: str) -> Path | None:
     expected = _expected_artifacts(payload)
-    raw = expected.get("pdf_path")
+    raw = expected.get(f"{artifact}_path")
     if not raw:
         return None
     relative = Path(str(raw))
     if relative.is_absolute():
-        raise RuntimeError(f"expected pdf_path debe ser relativo al cache compartido: {raw}")
+        raise RuntimeError(
+            f"expected {artifact}_path debe ser relativo al cache compartido: {raw}"
+        )
     candidate = (SHARED_CACHE_DIR / relative).resolve()
     shared_root = SHARED_CACHE_DIR.resolve()
     try:
         candidate.relative_to(shared_root)
     except ValueError as exc:
-        raise RuntimeError(f"expected pdf_path fuera del cache compartido: {raw}") from exc
+        raise RuntimeError(
+            f"expected {artifact}_path fuera del cache compartido: {raw}"
+        ) from exc
     return candidate
 
 
@@ -352,6 +467,13 @@ def _publish_pdf_to_shared_cache(src_pdf: Path, target_pdf: Path) -> None:
     tmp_target = target_pdf.with_suffix(f"{target_pdf.suffix}.tmp")
     shutil.copy2(src_pdf, tmp_target)
     os.replace(tmp_target, target_pdf)
+
+
+def _publish_text_to_shared_cache(content: str, target_path: Path) -> None:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_target = target_path.with_suffix(f"{target_path.suffix}.tmp")
+    tmp_target.write_text(content, encoding="utf-8")
+    os.replace(tmp_target, target_path)
 
 
 def _looks_like_signature_error(exc: Exception) -> bool:

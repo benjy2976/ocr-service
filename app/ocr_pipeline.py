@@ -517,8 +517,11 @@ def _is_pdf(path: Path) -> bool:
 def _extract_text(pdf_path: Path) -> str:
     doc = fitz.open(pdf_path)
     texts = []
-    for page in doc:
-        texts.append(page.get_text("text"))
+    try:
+        for page in doc:
+            texts.append(page.get_text("text"))
+    finally:
+        doc.close()
     return "\n".join(texts).strip()
 
 
