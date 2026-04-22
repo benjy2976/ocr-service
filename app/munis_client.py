@@ -142,8 +142,9 @@ def _dbg(method: str, url: str, status: int | None = None, body: str | None = No
     arrow = "→" if status is None else f"← {status}"
     print(f"[MUNIS HTTP] {method} {arrow} {url}", flush=True)
     if body:
-        preview = body[:800].replace("\n", " ")
-        print(f"             body: {preview}", flush=True)
+        print("             body:", flush=True)
+        for line in str(body).splitlines():
+            print(f"               {line}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -413,7 +414,7 @@ def report_artifacts(
     if engine_response_json is not None:
         body["engine_response_json"] = engine_response_json
 
-    _dbg("POST", url, body=json.dumps(body, ensure_ascii=False)[:1200])
+    _dbg("POST", url, body=json.dumps(body, ensure_ascii=False, indent=2))
     resp = _request_with_retry(
         lambda: requests.post(url, headers=_headers(), json=body, timeout=OCR_CALLBACK_TIMEOUT),
         method="POST",
@@ -544,7 +545,7 @@ def _post_business_outcome(
             "preflight": preflight,
         }
 
-    _dbg("POST", url, body=json.dumps(body, ensure_ascii=False)[:1200])
+    _dbg("POST", url, body=json.dumps(body, ensure_ascii=False, indent=2))
     resp = _request_with_retry(
         lambda: requests.post(url, headers=_headers(), json=body, timeout=OCR_CALLBACK_TIMEOUT),
         method="POST",

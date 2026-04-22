@@ -36,6 +36,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 from app import munis_client
 from app.ocr_pipeline import _extract_text, run_ocr_file
@@ -123,13 +124,12 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
     )
 
     processing_response = munis_client.mark_processing(queue_id, worker_name=worker_name)
-    payload = _merge_job_snapshot(payload, processing_response.get("data", processing_response))
-    queue_id = payload.get("queue_id") or payload.get("id") or queue_id
+    processing_payload = processing_response.get("data", processing_response)
 
     worker_logger.info(
-        "Snapshot processing queue_id=%s | processing_meta=%s",
+        "queue_id=%s marcado processing | processing_meta=%s",
         queue_id,
-        _safe_meta(payload),
+        _safe_meta(processing_payload) if isinstance(processing_payload, dict) else processing_payload,
     )
 
     requested_artifacts = _requested_artifacts(payload)
@@ -428,29 +428,6 @@ def _safe_meta(item: dict) -> str:
     return str(meta)
 
 
-def _merge_job_snapshot(original_payload: dict, processing_payload: dict) -> dict:
-    """
-    El snapshot devuelto por /processing pasa a ser autoritativo para todo el job.
-
-    Se hace merge defensivo para soportar respuestas parciales sin perder campos
-    de pull-next que la API no repita todavía.
-    """
-    if not isinstance(processing_payload, dict) or not processing_payload:
-        return dict(original_payload)
-    return _deep_merge_dicts(original_payload, processing_payload)
-
-
-def _deep_merge_dicts(base: dict, override: dict) -> dict:
-    merged = dict(base)
-    for key, value in override.items():
-        current = merged.get(key)
-        if isinstance(current, dict) and isinstance(value, dict):
-            merged[key] = _deep_merge_dicts(current, value)
-        else:
-            merged[key] = value
-    return merged
-
-
 def _requested_artifacts(payload: dict) -> dict[str, bool]:
     artifacts = payload.get("artifacts")
     requested = artifacts.get("requested") if isinstance(artifacts, dict) else None
@@ -683,6 +660,86 @@ def _run_worker_loop(worker_name: str) -> None:
             _interruptible_sleep(wait)
 
     worker_logger.info("Worker '%s' detenido limpiamente.", worker_name)
+
+
+def process_single_item(
+    item: dict[str, Any],
+    worker_name: str | None = None,
+    *,
+    raise_errors: bool = True,
+) -> None:
+    """
+    Procesa un item ya obtenido previamente, sin hacer polling continuo.
+    Útil para depuración uno por uno.
+    """
+    effective_worker_name = (worker_name or WORKER_NAME).strip() or WORKER_NAME
+    worker_logger = _worker_logger(effective_worker_name)
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    payload = item.get("data", item)
+    queue_id = payload.get("queue_id") or payload.get("id")
+    item_start = time.monotonic()
+
+    try:
+        _process_item(item, effective_worker_name, worker_logger)
+    except Exception as exc:
+        worker_logger.exception("Error procesando queue_id=%s: %s", queue_id, exc)
+        elapsed_ms = int((time.monotonic() - item_start) * 1000)
+        try:
+            munis_client.fail(queue_id, str(exc), duration_ms=elapsed_ms)
+        except Exception as fail_exc:
+            worker_logger.error(
+                "No se pudo reportar fallo a Munis (queue_id=%s): %s",
+                queue_id,
+                fail_exc,
+            )
+        if raise_errors:
+            raise
+
+
+def run_worker_once(worker_name: str | None = None) -> bool:
+    """
+    Hace un solo pull-next y procesa como máximo un item, luego sale.
+
+    Returns:
+        True si encontró y procesó un item, False si la cola estaba vacía.
+    """
+    effective_worker_name = (worker_name or WORKER_NAME).strip() or WORKER_NAME
+    worker_logger = _worker_logger(effective_worker_name)
+
+    if not WORKER_ENABLED:
+        worker_logger.info("OCR_WORKER_ENABLED=false → worker deshabilitado, saliendo.")
+        return False
+
+    if not munis_client.MUNIS_BASE_URL:
+        worker_logger.critical(
+            "MUNIS_BASE_URL no está configurado. El worker no puede iniciar."
+        )
+        sys.exit(1)
+
+    if not munis_client.MUNIS_OCR_TOKEN:
+        worker_logger.warning(
+            "MUNIS_OCR_TOKEN está vacío. Las peticiones a Munis probablemente fallarán."
+        )
+
+    worker_logger.info(
+        "Worker once '%s' iniciado | MUNIS_BASE_URL=%s",
+        effective_worker_name,
+        munis_client.MUNIS_BASE_URL,
+    )
+
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    item = munis_client.pull_next(worker_name=effective_worker_name)
+    if item is None:
+        worker_logger.info("Cola vacía: no se encontró item para procesar.")
+        return False
+
+    process_single_item(item, effective_worker_name)
+    worker_logger.info("Worker once '%s' terminó tras procesar un item.", effective_worker_name)
+    return True
 
 
 def _run_worker_process(index: int) -> None:
