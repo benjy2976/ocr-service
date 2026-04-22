@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ghostscript \
     unpaper \
     libgl1 libglib2.0-0 \
+    htop \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
