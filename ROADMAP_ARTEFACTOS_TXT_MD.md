@@ -21,18 +21,78 @@ Hoy el worker ya quedó orientado a:
 
 - leer `requested` y `expected`
 - generar y publicar `pdf`
+- generar y publicar `txt`
+- reutilizar `pdf` y `txt` ya presentes en cache compartido cuando el payload y los paths esperados lo permiten
 - reportar por `/artifacts`
 - usar `complete()` solo como fallback legacy
 
-Limitación actual:
+Estado real por fase:
 
-- solo soporta `pdf`
-- si no se pide `pdf`, la cola se omite
-- `txt` y `md` aún no se generan
+- Fase 1 (`txt` inicial): implementada
+- Fase 2 (consolidación de `txt`): parcial
+- Fases 3/4/5 (`md`): no iniciadas
 
 Base técnica ya disponible:
 
 - extracción de texto desde PDF en `app/ocr_pipeline.py`, función `_extract_text(pdf_path)`
+
+Pendientes reales al pausar esta línea:
+
+- cerrar correctamente el caso `txt`-only cuando el PDF fuente ya trae texto útil y `preflight` decide `skip`
+- agregar validaciones mínimas del artefacto `txt` (no vacío, longitud razonable, UTF-8)
+- reforzar pruebas de idempotencia y combinaciones `pdf/txt`
+- diseñar e implementar `md`
+
+Nota:
+
+La versión anterior de esta hoja de ruta quedó desfasada: ya no es cierto que el worker soporte solo `pdf`.
+
+## Regla de alcance por artefacto solicitado
+
+Esta línea de trabajo NO cambia el comportamiento actual cuando la cola pide solo `pdf`.
+
+Regla operativa:
+
+- si la cola pide solo `pdf`, el worker sigue funcionando exactamente como hoy
+- las adecuaciones descritas aquí aplican solo cuando la cola solicita `txt` y, más adelante, `md`
+
+Implicancia:
+
+- `preflight = skip` por texto útil ya no debe significar automáticamente "terminar el item"
+- cuando la cola pide artefactos textuales, `skip` debe significar "no hacer OCR", pero aún puede corresponder derivar `txt` o `md` desde el PDF fuente
+
+## Matriz de casos para esta etapa
+
+Enfoque inmediato de la adecuación:
+
+- `signed_text`
+- `unsigned_text`
+
+Para estos casos:
+
+- no se ejecuta OCR
+- `txt` debe derivarse directamente del `src_pdf`
+- `md` debe quedar preparado para derivarse después del mismo `src_pdf`
+
+Fuera del alcance de esta etapa:
+
+- cambiar el comportamiento de colas `pdf` only
+- rediseñar ahora el caso `unsigned_no_text` cuando la cola solo pide `pdf`
+- habilitar `md` ya mismo
+
+Casos de referencia:
+
+1. cola `pdf` only
+   - sin cambios respecto al flujo actual
+
+2. cola con `txt`
+   - si `signed_text` o `unsigned_text`: derivar `txt` desde `src_pdf`, sin OCR
+
+3. cola con `md`
+   - mismo criterio a futuro: derivar `md` desde `src_pdf` cuando ya hay texto útil, sin OCR
+
+4. cola con `pdf + txt` o `pdf + md`
+   - requiere coordinación explícita de política por artefacto, pero manteniendo que `pdf` solo no cambia
 
 ## Fase 1: Soporte inicial de TXT
 
@@ -55,6 +115,7 @@ Ventajas:
 
 1. Si la cola pide solo `pdf`:
    - comportamiento actual
+   - esta fase no altera esa ruta
 
 2. Si la cola pide `pdf + txt`:
    - generar `pdf`
@@ -71,6 +132,16 @@ Ventajas:
 ### Nota
 
 Aunque la cola pida solo `txt`, al inicio conviene permitir que el worker use el pipeline PDF como paso interno técnico, sin reportar `pdf` como producido.
+
+### Ajuste de alcance vigente
+
+Para la siguiente adecuación ya no se parte del supuesto "TXT sale siempre del PDF OCR final".
+
+Nuevo criterio:
+
+- cuando el documento ya tiene texto útil y la cola pide `txt`, el `txt` debe salir del `src_pdf`
+- cuando más adelante la cola pida `md`, el `md` debe salir del mismo `src_pdf`
+- el OCR sigue siendo la vía para otros casos, pero no es parte del alcance inmediato de esta adecuación
 
 ## Cambios previstos para TXT
 
@@ -144,6 +215,84 @@ Hacer el TXT más robusto e idempotente.
    - expected
    - paths publicados
    - métricas básicas (`text_len`, `duration_ms`)
+
+### Estado al pausar
+
+Avance ya implementado:
+
+1. reutilización de `expected.txt_path` / `expected.pdf_path` cuando el payload y el cache indican que el artefacto ya existe
+2. trazabilidad ampliada en `response_payload_json` y `engine_response_json`
+3. soporte para colas `pdf + txt` y `txt` derivado desde un PDF base disponible
+
+Pendiente antes de considerar cerrada la fase:
+
+1. no cortar el flujo con `skip` cuando la cola pide `txt` y el PDF fuente ya tiene texto útil; en ese caso se debe publicar `txt` sin rehacer OCR
+2. validar calidad mínima del `txt` antes de publicarlo o reutilizarlo
+3. agregar pruebas automatizadas para `pdf`, `pdf + txt`, `txt` solo, cache hit/miss y reproceso
+
+## Plan de adecuación técnica
+
+La adecuación debe hacerse sin romper el flujo actual de `pdf` only.
+
+### Etapa A: derivación textual desde PDF fuente con texto útil
+
+Objetivo:
+
+- soportar `txt` para `signed_text` y `unsigned_text` cuando la cola lo solicite
+- sin ejecutar OCR
+
+Cambios previstos:
+
+1. separar la decisión "no hacer OCR" de la decisión "terminar el item"
+2. introducir una resolución explícita del PDF base para artefactos textuales
+3. permitir que el flujo continúe cuando:
+   - `preflight.decision == "skip"`
+   - y la cola pide `txt`
+
+Resultado esperado:
+
+- `txt` sale del `src_pdf`
+- `pdf` only sigue intacto
+
+### Etapa B: consolidación del contrato de artefactos textuales
+
+Objetivo:
+
+- dejar el worker listo para integrar `md` después sin reabrir la arquitectura
+
+Cambios previstos:
+
+1. formalizar helpers conceptuales:
+   - `_resolve_pdf_base_for_text_artifacts(...)`
+   - `_generate_txt_from_pdf(...)`
+   - `_generate_md_from_pdf(...)`  ← placeholder / futura implementación
+2. registrar trazabilidad adicional:
+   - `text_source_kind = source_pdf | ocr_pdf`
+   - `classification`
+   - `has_useful_text`
+3. validar y publicar `txt` bajo el mismo contrato que luego usará `md`
+
+### Etapa C: preparación de integración futura con MD
+
+Objetivo:
+
+- dejar explícito que `md` usará el mismo punto de derivación textual que `txt`
+
+Decisión técnica:
+
+- para `signed_text` y `unsigned_text`, `md` debe derivarse del `src_pdf`
+- para otros casos, esa política se definirá después
+
+### Etapa D: pruebas mínimas antes de retomar MD
+
+Casos a cubrir:
+
+1. cola `pdf` only → sin cambios
+2. cola `txt` + `unsigned_text` → `txt` desde `src_pdf`
+3. cola `txt` + `signed_text` → `txt` desde `src_pdf`
+4. cola `txt` con cache hit → reutilización
+5. cola `txt` con cache miss y texto útil → generación sin OCR
+6. cola `md` solicitada → comportamiento explícito de no soporte mientras no se implemente
 
 ## Fase 3: Diseño inicial de MD
 
@@ -280,9 +429,10 @@ Funciones objetivo a futuro:
 
 Cuando se retome:
 
-- primero `txt`
-- luego validación e idempotencia de `txt`
-- después `md`
+- primero cerrar Fase 2 de `txt`
+- dentro de esa fase, resolver primero `signed_text` y `unsigned_text` cuando se solicite `txt`
+- después diseñar formato mínimo de `md`
+- luego implementar `md` simple por bloques/páginas
 - recién al final mejoras semánticas de `md`
 
 Ese orden minimiza riesgo y aprovecha lo que el proyecto ya tiene hoy.

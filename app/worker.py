@@ -116,7 +116,21 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
     if not queue_id:
         raise ValueError(f"Item sin queue_id: {item}")
 
-    worker_logger.info("Iniciando procesamiento queue_id=%s | meta=%s", queue_id, _safe_meta(payload))
+    worker_logger.info(
+        "Iniciando procesamiento queue_id=%s | pull_next_meta=%s",
+        queue_id,
+        _safe_meta(payload),
+    )
+
+    processing_response = munis_client.mark_processing(queue_id, worker_name=worker_name)
+    payload = _merge_job_snapshot(payload, processing_response.get("data", processing_response))
+    queue_id = payload.get("queue_id") or payload.get("id") or queue_id
+
+    worker_logger.info(
+        "Snapshot processing queue_id=%s | processing_meta=%s",
+        queue_id,
+        _safe_meta(payload),
+    )
 
     requested_artifacts = _requested_artifacts(payload)
     expected_artifacts = _expected_artifacts(payload)
@@ -130,8 +144,6 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
         for name, requested in requested_artifacts.items()
         if requested and SUPPORTED_ARTIFACTS.get(name, False)
     }
-
-    munis_client.mark_processing(queue_id, worker_name=worker_name)
 
     if not planned_artifacts:
         worker_logger.info(
@@ -166,6 +178,8 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
     txt_cached = _artifact_cached(payload, "txt", shared_txt_path)
     base_pdf_path: Path | None = shared_pdf_path if pdf_cached else None
     result: dict | None = None
+    text_source_kind: str | None = None
+    preflight: dict | None = None
 
     try:
         needs_base_pdf = bool(planned_artifacts.get("pdf") or planned_artifacts.get("txt"))
@@ -185,19 +199,27 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
 
             elapsed_ms = int((time.monotonic() - start_time) * 1000)
             if preflight["decision"] == "skip":
-                munis_client.skip(
-                    queue_id,
-                    message=preflight["message"],
-                    reason_code=preflight.get("reason_code"),
-                    duration_ms=elapsed_ms,
-                    preflight=preflight,
-                )
-                worker_logger.info(
-                    "queue_id=%s omitido por preflight | reason=%s",
-                    queue_id,
-                    preflight.get("reason_code"),
-                )
-                return
+                if planned_artifacts.get("txt"):
+                    base_pdf_path = src_pdf
+                    text_source_kind = "source_pdf"
+                    worker_logger.info(
+                        "queue_id=%s omite OCR por texto útil y usará el PDF fuente para artefactos textuales",
+                        queue_id,
+                    )
+                else:
+                    munis_client.skip(
+                        queue_id,
+                        message=preflight["message"],
+                        reason_code=preflight.get("reason_code"),
+                        duration_ms=elapsed_ms,
+                        preflight=preflight,
+                    )
+                    worker_logger.info(
+                        "queue_id=%s omitido por preflight | reason=%s",
+                        queue_id,
+                        preflight.get("reason_code"),
+                    )
+                    return
 
             if preflight["decision"] == "block":
                 munis_client.block(
@@ -214,56 +236,61 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
                 )
                 return
 
-            try:
-                result = run_ocr_file(src_pdf, tmp_dir=TMP_DIR, out_dir=OUT_DIR)
-            except Exception as exc:
-                if _looks_like_signature_error(exc):
-                    elapsed_ms = int((time.monotonic() - start_time) * 1000)
-                    fallback_preflight = {
-                        **preflight,
-                        "decision": "block",
-                        "reason_code": "digital_signature_detected_during_ocr",
-                        "message": "OCR bloqueado por firma digital detectada durante el procesamiento",
-                    }
-                    munis_client.block(
-                        queue_id,
-                        message=fallback_preflight["message"],
-                        reason_code=fallback_preflight["reason_code"],
-                        duration_ms=elapsed_ms,
-                        preflight=fallback_preflight,
-                    )
-                    worker_logger.warning(
-                        "queue_id=%s bloqueado por firma detectada durante OCR",
-                        queue_id,
-                    )
-                    return
-                raise
+            if preflight["decision"] != "skip":
+                try:
+                    result = run_ocr_file(src_pdf, tmp_dir=TMP_DIR, out_dir=OUT_DIR)
+                except Exception as exc:
+                    if _looks_like_signature_error(exc):
+                        elapsed_ms = int((time.monotonic() - start_time) * 1000)
+                        fallback_preflight = {
+                            **preflight,
+                            "decision": "block",
+                            "reason_code": "digital_signature_detected_during_ocr",
+                            "message": "OCR bloqueado por firma digital detectada durante el procesamiento",
+                        }
+                        munis_client.block(
+                            queue_id,
+                            message=fallback_preflight["message"],
+                            reason_code=fallback_preflight["reason_code"],
+                            duration_ms=elapsed_ms,
+                            preflight=fallback_preflight,
+                        )
+                        worker_logger.warning(
+                            "queue_id=%s bloqueado por firma detectada durante OCR",
+                            queue_id,
+                        )
+                        return
+                    raise
 
-            generated_paths = _result_artifact_paths(result)
+                generated_paths = _result_artifact_paths(result)
 
-            out_pdf = result.get("output_pdf")
-            if not out_pdf:
-                raise RuntimeError(f"run_ocr_file no devolvió output_pdf. result={result}")
+                out_pdf = result.get("output_pdf")
+                if not out_pdf:
+                    raise RuntimeError(f"run_ocr_file no devolvió output_pdf. result={result}")
 
-            out_pdf_path = Path(out_pdf)
-            if not out_pdf_path.exists():
-                raise RuntimeError(f"output_pdf no existe en disco: {out_pdf_path}")
+                out_pdf_path = Path(out_pdf)
+                if not out_pdf_path.exists():
+                    raise RuntimeError(f"output_pdf no existe en disco: {out_pdf_path}")
 
-            if shared_pdf_path is not None:
-                _publish_pdf_to_shared_cache(out_pdf_path, shared_pdf_path)
-                base_pdf_path = shared_pdf_path
-            else:
-                base_pdf_path = out_pdf_path
-            pdf_cached = True
-            produced_artifacts["pdf"] = True
-            worker_logger.info(
-                "OCR PDF base listo queue_id=%s | pdf=%s",
-                queue_id,
-                base_pdf_path,
-            )
+                if shared_pdf_path is not None:
+                    _publish_pdf_to_shared_cache(out_pdf_path, shared_pdf_path)
+                    base_pdf_path = shared_pdf_path
+                else:
+                    base_pdf_path = out_pdf_path
+                pdf_cached = True
+                produced_artifacts["pdf"] = True
+                if text_source_kind is None:
+                    text_source_kind = "ocr_pdf"
+                worker_logger.info(
+                    "OCR PDF base listo queue_id=%s | pdf=%s",
+                    queue_id,
+                    base_pdf_path,
+                )
 
         if planned_artifacts.get("txt"):
             if txt_cached and shared_txt_path is not None:
+                if text_source_kind is None:
+                    text_source_kind = "shared_cache_txt"
                 worker_logger.info(
                     "TXT reutilizado desde cache queue_id=%s | txt=%s",
                     queue_id,
@@ -278,10 +305,12 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
                     raise RuntimeError(
                         "La cola solicita TXT pero artifacts.expected.txt_path no fue provisto"
                     )
-                txt_content = _extract_text(base_pdf_path)
+                txt_content = _generate_txt_from_pdf(base_pdf_path)
                 _publish_text_to_shared_cache(txt_content, shared_txt_path)
                 txt_cached = True
                 produced_artifacts["txt"] = True
+                if text_source_kind is None:
+                    text_source_kind = "source_pdf" if base_pdf_path == src_pdf else "ocr_pdf"
                 worker_logger.info(
                     "TXT generado queue_id=%s | txt=%s | text_len=%d",
                     queue_id,
@@ -310,6 +339,8 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
                 "resolved_pdf_path": str(base_pdf_path) if base_pdf_path else None,
                 "resolved_txt_path": str(shared_txt_path) if shared_txt_path else None,
             },
+            "preflight": preflight,
+            "text_source_kind": text_source_kind,
             "ocr": {
                 "mode": result.get("mode") if result else None,
                 "text_len": result.get("text_len") if result else None,
@@ -328,6 +359,8 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
             "document": payload.get("document") or {},
             "artifacts": payload.get("artifacts") or {},
             "ocr_flags": _ocr_artifact_flags(payload),
+            "preflight": preflight,
+            "text_source_kind": text_source_kind,
         }
 
         if expected_artifacts:
@@ -343,7 +376,11 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
                 queue_id,
                 processor=worker_name,
                 duration_ms=elapsed_ms,
-                finalize_queue=not unsupported_artifacts,
+                finalize_queue=_should_finalize_queue(
+                    planned_artifacts,
+                    reportable_artifacts,
+                    unsupported_artifacts,
+                ),
                 artifacts=reportable_artifacts,
                 response_payload_json=response_payload,
                 engine_response_json=engine_response,
@@ -389,6 +426,29 @@ def _safe_meta(item: dict) -> str:
         if isinstance(expected, dict) and "dir" in expected:
             meta["artifacts_dir"] = expected["dir"]
     return str(meta)
+
+
+def _merge_job_snapshot(original_payload: dict, processing_payload: dict) -> dict:
+    """
+    El snapshot devuelto por /processing pasa a ser autoritativo para todo el job.
+
+    Se hace merge defensivo para soportar respuestas parciales sin perder campos
+    de pull-next que la API no repita todavía.
+    """
+    if not isinstance(processing_payload, dict) or not processing_payload:
+        return dict(original_payload)
+    return _deep_merge_dicts(original_payload, processing_payload)
+
+
+def _deep_merge_dicts(base: dict, override: dict) -> dict:
+    merged = dict(base)
+    for key, value in override.items():
+        current = merged.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = _deep_merge_dicts(current, value)
+        else:
+            merged[key] = value
+    return merged
 
 
 def _requested_artifacts(payload: dict) -> dict[str, bool]:
@@ -474,6 +534,26 @@ def _publish_text_to_shared_cache(content: str, target_path: Path) -> None:
     tmp_target = target_path.with_suffix(f"{target_path.suffix}.tmp")
     tmp_target.write_text(content, encoding="utf-8")
     os.replace(tmp_target, target_path)
+
+
+def _generate_txt_from_pdf(pdf_path: Path) -> str:
+    content = _extract_text(pdf_path)
+    if not content.strip():
+        raise RuntimeError(f"TXT derivado vacío desde PDF base: {pdf_path}")
+    return content
+
+
+def _should_finalize_queue(
+    planned_artifacts: dict[str, bool],
+    reportable_artifacts: dict[str, bool],
+    unsupported_artifacts: dict[str, bool],
+) -> bool:
+    if unsupported_artifacts:
+        return False
+    for artifact, planned in planned_artifacts.items():
+        if planned and not reportable_artifacts.get(artifact, False):
+            return False
+    return True
 
 
 def _looks_like_signature_error(exc: Exception) -> bool:
