@@ -452,6 +452,12 @@ def _ocr_artifact_flags(payload: dict) -> dict[str, bool | None]:
         value = payload.get(key)
         if isinstance(value, dict):
             candidates.append(value)
+    queue_payload = payload.get("queue")
+    if isinstance(queue_payload, dict):
+        for key in ("ocr", "ocr_record", "file_ocr"):
+            value = queue_payload.get(key)
+            if isinstance(value, dict):
+                candidates.append(value)
     candidates.append(payload)
     for candidate in candidates:
         flags = {}
@@ -475,7 +481,9 @@ def _artifact_cached(payload: dict, artifact: str, resolved_path: Path | None) -
         return bool(has_flag)
     if has_flag is False:
         return False
-    return resolved_path.exists()
+    if has_flag is True:
+        return resolved_path.exists()
+    return False
 
 
 def _resolve_expected_artifact_path(payload: dict, artifact: str) -> Path | None:
