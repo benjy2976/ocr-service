@@ -25,6 +25,7 @@ Variables de entorno relevantes:
 
   Además acepta todas las variables OCR de ocr_pipeline.py:
   OCR_TMP_DIR, OCR_OUT_DIR, OCR_MODE, OCR_LANG, OCR_MASK_STAMPS, etc.
+  OCR_WORK_DIR                       Scratch local para intermedios del worker (default: <OCR_TMP_DIR>/work)
 """
 
 import logging
@@ -58,6 +59,7 @@ MAX_CONSECUTIVE_ERRORS: int = int(os.getenv("OCR_WORKER_MAX_CONSECUTIVE_ERRORS",
 
 TMP_DIR = Path(os.getenv("OCR_TMP_DIR", "/data/tmp"))
 OUT_DIR = Path(os.getenv("OCR_OUT_DIR", "/data/out"))
+WORK_DIR = Path(os.getenv("OCR_WORK_DIR", str(TMP_DIR / "work")))
 SHARED_CACHE_DIR = Path(os.getenv("OCR_SHARED_CACHE_DIR", "/nfs-cache"))
 SUPPORTED_ARTIFACTS = {"pdf": True, "txt": True, "md": False}
 
@@ -247,7 +249,7 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
 
             if preflight["decision"] != "skip":
                 try:
-                    result = run_ocr_file(src_pdf, tmp_dir=TMP_DIR, out_dir=OUT_DIR)
+                    result = run_ocr_file(src_pdf, tmp_dir=TMP_DIR, out_dir=WORK_DIR)
                 except Exception as exc:
                     if _looks_like_signature_error(exc):
                         elapsed_ms = int((time.monotonic() - start_time) * 1000)
@@ -409,8 +411,6 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
             raise RuntimeError(
                 "No hay artifacts.expected para reportar y no se produjo un PDF para fallback legacy"
             )
-        _cleanup(*generated_paths)
-
     except munis_client.QueueSourceUnavailableError as exc:
         elapsed_ms = int((time.monotonic() - start_time) * 1000)
         worker_logger.warning(
@@ -421,6 +421,7 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
         munis_client.fail(queue_id, exc.message, duration_ms=elapsed_ms)
 
     finally:
+        _cleanup(*generated_paths)
         _cleanup(src_pdf)
 
 

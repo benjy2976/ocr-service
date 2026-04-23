@@ -55,7 +55,11 @@ services:
       # ── Directorios ──────────────────────────────────────────────────────────
       OCR_TMP_DIR: /data/tmp
       OCR_OUT_DIR: /data/out
+      OCR_WORK_DIR: /data/tmp/work
       OCR_SHARED_CACHE_DIR: /nfs-cache
+      TMPDIR: /data/tmp
+      TMP: /data/tmp
+      TEMP: /data/tmp
       # ── OCR ─────────────────────────────────────────────────────────────────
       OCR_LANG: spa
       OCR_MODE: searchable_cpu
@@ -79,6 +83,9 @@ services:
       - ./data:/data
       - ocr_nfs_cache:/nfs-cache
       - ./app:/app/app
+    tmpfs:
+      - /tmp
+      - /data/tmp
     networks:
       - grh_network
     command: ["python3", "-m", "app.worker_main"]
