@@ -206,6 +206,15 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
                         "queue_id=%s omite OCR por texto útil y usará el PDF fuente para artefactos textuales",
                         queue_id,
                     )
+                    if planned_artifacts.get("pdf") and shared_pdf_path is not None:
+                        _publish_pdf_to_shared_cache(src_pdf, shared_pdf_path)
+                        pdf_cached = True
+                        produced_artifacts["pdf"] = True
+                        worker_logger.info(
+                            "PDF fuente publicado como artefacto PDF queue_id=%s | pdf=%s",
+                            queue_id,
+                            shared_pdf_path,
+                        )
                 else:
                     munis_client.skip(
                         queue_id,
