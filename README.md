@@ -264,8 +264,16 @@ Buscar:
 curl 'http://localhost:18020/search?q=liquidacion&year=2021'
 ```
 
-La respuesta incluye `regulation_file_id`, `regulation_id`, pagina, score,
+La respuesta incluye `regulation_id`, archivos coincidentes, paginas, score,
 rutas de artefactos y fragmentos resaltados.
+Por defecto devuelve una sola vez cada norma (`group_by=regulation`), con
+`matched_files` y dentro de cada archivo `matched_pages`. Para resultados por
+archivo usar `group_by=file`; para resultados por página usar `group_by=page`.
+
+Contrato para integracion con otros aplicativos:
+- ver [api.md](api.md), seccion `API de busqueda`
+- URL local: `http://localhost:18020`
+- URL interna Docker: `http://ocr-search-api:8000`
 
 - POST /ocr/local
   Procesa un PDF que ya existe en el filesystem del contenedor.

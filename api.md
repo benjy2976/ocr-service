@@ -265,19 +265,57 @@ pagina o por chunks.
 
 Base URL local: `http://localhost:18020`
 
+Base URL interna Docker: `http://ocr-search-api:8000`
+
+Esta API está pensada para integrarse desde Munis u otro aplicativo. No consulta
+la base de datos de Munis en tiempo real: responde desde OpenSearch usando los
+metadatos guardados en el artefacto `text`.
+
+### GET /health
+
+Verifica que la API esté viva y que pueda conectarse a OpenSearch.
+
+Ejemplo:
+
+```bash
+curl 'http://localhost:18020/health'
+```
+
+Respuesta:
+
+```json
+{
+  "status": "ok",
+  "opensearch": true,
+  "index": "munis_ocr_pages"
+}
+```
+
 ### GET /search
 
-Parametros:
-- `q`: texto de busqueda
-- `limit`: cantidad de resultados, default `10`
-- `offset`: desplazamiento para paginacion
-- `regulation_file_id`: filtro opcional
-- `regulation_id`: filtro opcional
-- `year`: filtro opcional por `reg_year`
-- `tipo`: filtro opcional por `regulations_tipo`
-- `sigla_id`: filtro opcional por `regulation_type_sigla_id`
-- `regulation_type_id`: filtro opcional por tipo de norma
-- `regulation_type_sigla_id`: filtro opcional por sigla de tipo de norma
+Busca texto OCR indexado por página.
+
+Método: `GET`
+
+Content-Type de respuesta: `application/json`
+
+Parámetros query:
+
+| Parámetro | Tipo | Requerido | Default | Descripción |
+|-----------|------|-----------|---------|-------------|
+| `q` | string | sí | - | Texto de búsqueda. Mínimo 1 carácter. |
+| `limit` | integer | no | `10` | Cantidad de resultados. Mínimo `1`, máximo `100`. |
+| `offset` | integer | no | `0` | Desplazamiento para paginación. |
+| `regulation_file_id` | integer | no | - | Filtra por ID del archivo de norma. |
+| `regulation_id` | integer | no | - | Filtra por ID de la norma. |
+| `year` | integer | no | - | Filtra por `reg_year`. |
+| `tipo` | integer | no | - | Filtra por `regulations_tipo`. Alias histórico. |
+| `sigla_id` | integer | no | - | Filtra por `regulation_type_sigla_id`. Alias corto. |
+| `regulation_type_id` | integer | no | - | Filtra por tipo de norma. |
+| `regulation_type_sigla_id` | integer | no | - | Filtra por sigla de tipo de norma. |
+| `group_by` | string | no | `regulation` | `regulation` devuelve una sola vez cada norma; `file` devuelve una vez cada archivo; `page` devuelve una fila por página encontrada. `document` se acepta como alias de `file`. |
+| `matched_files_limit` | integer | no | `10` | Máximo de archivos coincidentes inspeccionados dentro de cada norma cuando `group_by=regulation`. Mínimo `1`, máximo `50`. |
+| `matched_pages_limit` | integer | no | `5` | Máximo de páginas coincidentes incluidas dentro de cada archivo cuando `group_by=regulation` o `group_by=file`. Mínimo `1`, máximo `20`. |
 
 Ejemplo:
 
@@ -285,27 +323,171 @@ Ejemplo:
 curl 'http://localhost:18020/search?q=liquidacion&year=2021'
 ```
 
+Ejemplo con filtros de tipo:
+
+```bash
+curl 'http://localhost:18020/search?q=liquidacion&regulation_type_id=49&sigla_id=51'
+```
+
+Ejemplo para devolver una fila por archivo:
+
+```bash
+curl 'http://localhost:18020/search?q=liquidacion&group_by=file'
+```
+
+Ejemplo para devolver coincidencias por página, sin agrupar:
+
+```bash
+curl 'http://localhost:18020/search?q=liquidacion&group_by=page'
+```
+
 Respuesta:
 
 ```json
 {
   "query": "liquidacion",
+  "group_by": "regulation",
   "total": 1,
+  "total_page_matches": 7,
   "limit": 10,
   "offset": 0,
   "results": [
     {
       "regulation_file_id": 88656,
       "regulation_id": 97539,
+      "source_md5": "abcdef1234567890abcdef1234567890",
       "page": 1,
+      "page_count": 3,
       "score": 12.3,
       "text_path": "2021/88656/hash.jsonl",
       "pdf_path": "2021/88656/hash.pdf",
+      "source_path": "2021/005/005000002372021_1619788476.pdf",
+      "file_name": "Resolucion Gerencial Regional GRI 000237-2021-GRH/GRI..pdf",
+      "reg_num": 237,
+      "reg_year": 2021,
+      "reg_date": "2021-04-29",
+      "reg_title": "Resolucion Gerencial Regional GRI 000237-2021-GRH/GRI.",
+      "reg_description": "Descripcion de la norma...",
+      "regulations_tipo": 49,
+      "regulations_tipos_sigla_id": 51,
+      "regulation_type_id": 49,
+      "regulation_type_sigla_id": 51,
+      "text_source_kind": "ocr_pdf",
       "highlight": {
         "text": ["...<mark>Liquidación</mark> Financiera..."]
-      }
+      },
+      "matched_files": [
+        {
+          "regulation_file_id": 88656,
+          "file_name": "Resolucion Gerencial Regional GRI 000237-2021-GRH/GRI..pdf",
+          "pdf_path": "2021/88656/hash-a.pdf",
+          "text_path": "2021/88656/hash-a.jsonl",
+          "score": 12.3,
+          "matched_pages": [
+            {
+              "page": 1,
+              "char_count": 1420,
+              "word_count": 210,
+              "score": 12.3,
+              "highlight": {
+                "text": ["...<mark>Liquidación</mark> Financiera..."]
+              }
+            },
+            {
+              "page": 2,
+              "char_count": 1180,
+              "word_count": 180,
+              "score": 8.9,
+              "highlight": {
+                "text": ["...gastos de <mark>Liquidación</mark>..."]
+              }
+            }
+          ]
+        },
+        {
+          "regulation_file_id": 88657,
+          "file_name": "Anexo.pdf",
+          "pdf_path": "2021/88657/hash-b.pdf",
+          "text_path": "2021/88657/hash-b.jsonl",
+          "score": 7.4,
+          "matched_pages": [
+            {
+              "page": 4,
+              "char_count": 980,
+              "word_count": 150,
+              "score": 7.4,
+              "highlight": {
+                "text": ["...<mark>Liquidación</mark> del anexo..."]
+              }
+            }
+          ]
+        }
+      ]
     }
   ]
+}
+```
+
+Campos principales de respuesta:
+
+- `query`: texto buscado.
+- `group_by`: modo de agrupación aplicado.
+- `total`: si `group_by=regulation`, total aproximado de normas encontradas;
+  si `group_by=file`, total aproximado de archivos encontrados; si
+  `group_by=page`, total de páginas encontradas.
+- `total_page_matches`: total de páginas coincidentes antes de agrupar.
+- `limit`: límite aplicado.
+- `offset`: desplazamiento aplicado.
+- `results`: arreglo de resultados por página indexada.
+- `results[].regulation_file_id`: ID del archivo en Munis.
+- `results[].regulation_id`: ID de la norma en Munis.
+- `results[].page`: página principal de coincidencia. Solo aplica directamente
+  cuando `group_by=page`; en modos agrupados revisar `matched_files` o
+  `matched_pages`.
+- `results[].score`: relevancia calculada por OpenSearch.
+- `results[].highlight`: fragmentos resaltados con `<mark>...</mark>`.
+- `results[].matched_files`: archivos coincidentes de la norma cuando
+  `group_by=regulation`.
+- `results[].matched_files[].matched_pages`: páginas coincidentes dentro de ese
+  archivo.
+- `results[].matched_pages`: páginas coincidentes del mismo archivo cuando
+  `group_by=file`.
+
+Notas de integración:
+
+- Por defecto cada resultado representa una norma única (`regulation_id`).
+- Si una norma tiene dos o más archivos con coincidencias, aparecerá una sola
+  vez y esos archivos estarán en `matched_files`.
+- Para ver cada archivo como resultado independiente, usar `group_by=file`.
+- Para ver cada página como resultado independiente, usar `group_by=page`.
+- `text_path` y `pdf_path` son rutas relativas al cache OCR compartido.
+- La API no devuelve el texto completo de la página; devuelve metadatos y
+  fragmentos resaltados.
+- Si se necesita abrir el PDF desde otro aplicativo, debe construir la URL
+  pública usando `pdf_path` o resolverlo desde Munis.
+- El resaltado usa HTML simple con etiquetas `<mark>`.
+
+Errores comunes:
+
+- `422 Unprocessable Entity`: falta `q`, `limit` está fuera de rango o algún
+  filtro numérico no es entero.
+- `500 Internal Server Error`: OpenSearch no está disponible o el índice no se
+  pudo crear/consultar.
+
+Ejemplo de integración desde JavaScript:
+
+```js
+const params = new URLSearchParams({
+  q: 'liquidacion',
+  year: '2021',
+  limit: '20'
+});
+
+const res = await fetch(`http://localhost:18020/search?${params}`);
+const data = await res.json();
+
+for (const item of data.results) {
+  console.log(item.regulation_file_id, item.regulation_id, item.page);
 }
 ```
 
