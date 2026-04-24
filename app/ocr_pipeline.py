@@ -515,14 +515,21 @@ def _is_pdf(path: Path) -> bool:
 
 
 def _extract_text(pdf_path: Path) -> str:
+    return "\n".join(page["text"] for page in _extract_text_pages(pdf_path)).strip()
+
+
+def _extract_text_pages(pdf_path: Path) -> list[dict]:
     doc = fitz.open(pdf_path)
-    texts = []
+    pages = []
     try:
-        for page in doc:
-            texts.append(page.get_text("text"))
+        for index, page in enumerate(doc, start=1):
+            pages.append({
+                "page": index,
+                "text": page.get_text("text") or "",
+            })
     finally:
         doc.close()
-    return "\n".join(texts).strip()
+    return pages
 
 
 def _mask_stamps_and_signatures(

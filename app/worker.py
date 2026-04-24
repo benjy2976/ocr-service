@@ -31,6 +31,8 @@ Variables de entorno relevantes:
 import logging
 import multiprocessing as mp
 import os
+import json
+import re
 import signal
 import shutil
 import sys
@@ -40,7 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from app import munis_client
-from app.ocr_pipeline import _extract_text, run_ocr_file
+from app.ocr_pipeline import _extract_text_pages, run_ocr_file
 from app.preflight import inspect_pdf
 
 # ---------------------------------------------------------------------------
@@ -61,7 +63,9 @@ TMP_DIR = Path(os.getenv("OCR_TMP_DIR", "/data/tmp"))
 OUT_DIR = Path(os.getenv("OCR_OUT_DIR", "/data/out"))
 WORK_DIR = Path(os.getenv("OCR_WORK_DIR", str(TMP_DIR / "work")))
 SHARED_CACHE_DIR = Path(os.getenv("OCR_SHARED_CACHE_DIR", "/nfs-cache"))
-SUPPORTED_ARTIFACTS = {"pdf": True, "txt": True, "md": False}
+SUPPORTED_ARTIFACTS = {"pdf": True, "text": True, "md": False}
+TEXT_SCHEMA = "ocr.text.document.v1"
+_WORD_RE = re.compile(r"\b[\wÁÉÍÓÚÜÑáéíóúüñ]{2,}\b", re.UNICODE)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -155,7 +159,7 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
         )
         munis_client.skip(
             queue_id,
-            message="Cola omitida: este worker solo atiende artefactos PDF/TXT",
+            message="Cola omitida: este worker solo atiende artefactos PDF/TEXT",
             reason_code="no_supported_artifacts_requested",
             duration_ms=0,
             preflight={
@@ -175,16 +179,19 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
     produced_artifacts: dict[str, bool] = {}
     reportable_artifacts: dict[str, bool] = {}
     shared_pdf_path = _resolve_expected_artifact_path(payload, "pdf")
-    shared_txt_path = _resolve_expected_artifact_path(payload, "txt")
+    shared_text_path = _resolve_expected_artifact_path(payload, "text")
     pdf_cached = _artifact_cached(payload, "pdf", shared_pdf_path)
-    txt_cached = _artifact_cached(payload, "txt", shared_txt_path)
+    text_cached = _artifact_cached(payload, "text", shared_text_path)
     base_pdf_path: Path | None = shared_pdf_path if pdf_cached else None
     result: dict | None = None
     text_source_kind: str | None = None
     preflight: dict | None = None
 
     try:
-        needs_base_pdf = bool(planned_artifacts.get("pdf") or planned_artifacts.get("txt"))
+        needs_base_pdf = bool(
+            (planned_artifacts.get("pdf") and not pdf_cached)
+            or (planned_artifacts.get("text") and not text_cached)
+        )
         if needs_base_pdf and not pdf_cached:
             munis_client.download_source(queue_id, src_pdf)
             worker_logger.info("PDF descargado: %s (%d bytes)", src_pdf, src_pdf.stat().st_size)
@@ -201,7 +208,7 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
 
             elapsed_ms = int((time.monotonic() - start_time) * 1000)
             if preflight["decision"] == "skip":
-                if planned_artifacts.get("txt"):
+                if planned_artifacts.get("text"):
                     base_pdf_path = src_pdf
                     text_source_kind = "source_pdf"
                     worker_logger.info(
@@ -283,13 +290,14 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
                 if not out_pdf_path.exists():
                     raise RuntimeError(f"output_pdf no existe en disco: {out_pdf_path}")
 
-                if shared_pdf_path is not None:
+                if planned_artifacts.get("pdf") and shared_pdf_path is not None:
                     _publish_pdf_to_shared_cache(out_pdf_path, shared_pdf_path)
                     base_pdf_path = shared_pdf_path
                 else:
                     base_pdf_path = out_pdf_path
-                pdf_cached = True
-                produced_artifacts["pdf"] = True
+                if planned_artifacts.get("pdf"):
+                    pdf_cached = True
+                    produced_artifacts["pdf"] = True
                 if text_source_kind is None:
                     text_source_kind = "ocr_pdf"
                 worker_logger.info(
@@ -298,44 +306,50 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
                     base_pdf_path,
                 )
 
-        if planned_artifacts.get("txt"):
-            if txt_cached and shared_txt_path is not None:
+        if planned_artifacts.get("text"):
+            if text_cached and shared_text_path is not None:
                 if text_source_kind is None:
-                    text_source_kind = "shared_cache_txt"
+                    text_source_kind = "shared_cache_text"
                 worker_logger.info(
-                    "TXT reutilizado desde cache queue_id=%s | txt=%s",
+                    "TEXT reutilizado desde cache queue_id=%s | text=%s",
                     queue_id,
-                    shared_txt_path,
+                    shared_text_path,
                 )
             else:
                 if base_pdf_path is None or not base_pdf_path.exists():
                     raise RuntimeError(
-                        "No hay PDF base disponible para derivar TXT del cache OCR"
+                        "No hay PDF base disponible para derivar TEXT del cache OCR"
                     )
-                if shared_txt_path is None:
+                if shared_text_path is None:
                     raise RuntimeError(
-                        "La cola solicita TXT pero artifacts.expected.txt_path no fue provisto"
+                        "La cola solicita TEXT pero artifacts.expected.text_path no fue provisto"
                     )
-                txt_content = _generate_txt_from_pdf(base_pdf_path)
-                _publish_text_to_shared_cache(txt_content, shared_txt_path)
-                txt_cached = True
-                produced_artifacts["txt"] = True
+                resolved_text_source_kind = text_source_kind or (
+                    "source_pdf" if base_pdf_path == src_pdf else "ocr_pdf"
+                )
+                text_content, text_stats = _generate_text_from_pdf(
+                    base_pdf_path,
+                    text_source_kind=resolved_text_source_kind,
+                )
+                _publish_text_to_shared_cache(text_content, shared_text_path)
+                text_cached = True
+                produced_artifacts["text"] = True
                 if text_source_kind is None:
-                    text_source_kind = "source_pdf" if base_pdf_path == src_pdf else "ocr_pdf"
+                    text_source_kind = resolved_text_source_kind
                 worker_logger.info(
-                    "TXT generado queue_id=%s | txt=%s | text_len=%d",
+                    "TEXT JSON generado queue_id=%s | text=%s | pages=%d | non_empty_pages=%d | text_len=%d",
                     queue_id,
-                    shared_txt_path,
-                    len(txt_content),
+                    shared_text_path,
+                    text_stats["page_count"],
+                    text_stats["non_empty_pages"],
+                    text_stats["text_len"],
                 )
 
-        if requested_artifacts.get("pdf") and pdf_cached:
-            reportable_artifacts["pdf"] = True
-        elif produced_artifacts.get("pdf"):
+        if requested_artifacts.get("pdf") and (pdf_cached or produced_artifacts.get("pdf")):
             reportable_artifacts["pdf"] = True
 
-        if requested_artifacts.get("txt") and txt_cached:
-            reportable_artifacts["txt"] = True
+        if requested_artifacts.get("text") and text_cached:
+            reportable_artifacts["text"] = True
 
         elapsed_ms = int((time.monotonic() - start_time) * 1000)
         response_payload = {
@@ -348,7 +362,7 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
             "storage": {
                 "shared_cache_dir": str(SHARED_CACHE_DIR),
                 "resolved_pdf_path": str(base_pdf_path) if base_pdf_path else None,
-                "resolved_txt_path": str(shared_txt_path) if shared_txt_path else None,
+                "resolved_text_path": str(shared_text_path) if shared_text_path else None,
             },
             "preflight": preflight,
             "text_source_kind": text_source_kind,
@@ -362,7 +376,7 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
             "result": {
                 "mode": result.get("mode") if result else None,
                 "output_pdf": str(base_pdf_path) if base_pdf_path else None,
-                "output_txt": str(shared_txt_path) if txt_cached and shared_txt_path else None,
+                "output_text": str(shared_text_path) if text_cached and shared_text_path else None,
                 "text_len": result.get("text_len") if result else None,
                 "elapsed_sec": result.get("elapsed_sec") if result else None,
             },
@@ -379,9 +393,9 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
                 raise RuntimeError(
                     "La cola reporta pdf pero artifacts.expected.pdf_path no fue provisto"
                 )
-            if reportable_artifacts.get("txt") and shared_txt_path is None:
+            if reportable_artifacts.get("text") and shared_text_path is None:
                 raise RuntimeError(
-                    "La cola reporta txt pero artifacts.expected.txt_path no fue provisto"
+                    "La cola reporta text pero artifacts.expected.text_path no fue provisto"
                 )
             munis_client.report_artifacts(
                 queue_id,
@@ -442,10 +456,10 @@ def _requested_artifacts(payload: dict) -> dict[str, bool]:
     artifacts = payload.get("artifacts")
     requested = artifacts.get("requested") if isinstance(artifacts, dict) else None
     if not isinstance(requested, dict):
-        return {"pdf": True, "txt": False, "md": False}
+        return {"pdf": True, "text": False, "md": False}
     return {
         "pdf": bool(requested.get("pdf")),
-        "txt": bool(requested.get("txt")),
+        "text": bool(requested.get("text")),
         "md": bool(requested.get("md")),
     }
 
@@ -472,7 +486,7 @@ def _ocr_artifact_flags(payload: dict) -> dict[str, bool | None]:
     for candidate in candidates:
         flags = {}
         found = False
-        for name in ("pdf", "txt", "md"):
+        for name in ("pdf", "text", "md"):
             key = f"has_{name}"
             if key in candidate:
                 flags[name] = bool(candidate.get(key))
@@ -481,7 +495,7 @@ def _ocr_artifact_flags(payload: dict) -> dict[str, bool | None]:
                 flags[name] = None
         if found:
             return flags
-    return {"pdf": None, "txt": None, "md": None}
+    return {"pdf": None, "text": None, "md": None}
 
 
 def _artifact_cached(payload: dict, artifact: str, resolved_path: Path | None) -> bool:
@@ -531,11 +545,52 @@ def _publish_text_to_shared_cache(content: str, target_path: Path) -> None:
     os.replace(tmp_target, target_path)
 
 
-def _generate_txt_from_pdf(pdf_path: Path) -> str:
-    content = _extract_text(pdf_path)
-    if not content.strip():
-        raise RuntimeError(f"TXT derivado vacío desde PDF base: {pdf_path}")
-    return content
+def _generate_text_from_pdf(
+    pdf_path: Path,
+    *,
+    text_source_kind: str,
+) -> tuple[str, dict[str, int]]:
+    extracted_pages = _extract_text_pages(pdf_path)
+    page_count = len(extracted_pages)
+    pages: list[dict[str, Any]] = []
+    non_empty_pages = 0
+    total_text_len = 0
+
+    for extracted_page in extracted_pages:
+        page_number = int(extracted_page["page"])
+        text = str(extracted_page.get("text") or "").strip()
+        char_count = len(text)
+        word_count = len(_WORD_RE.findall(text))
+        empty = not bool(text)
+        if not empty:
+            non_empty_pages += 1
+        total_text_len += char_count
+        pages.append({
+            "page": page_number,
+            "text": text,
+            "char_count": char_count,
+            "word_count": word_count,
+            "empty": empty,
+        })
+
+    if non_empty_pages == 0:
+        raise RuntimeError(f"TEXT JSON derivado vacío desde PDF base: {pdf_path}")
+
+    payload = {
+        "schema": TEXT_SCHEMA,
+        "page_count": page_count,
+        "non_empty_pages": non_empty_pages,
+        "text_len": total_text_len,
+        "text_source_kind": text_source_kind,
+        "extraction_engine": "pymupdf",
+        "pages": pages,
+    }
+
+    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n", {
+        "page_count": page_count,
+        "non_empty_pages": non_empty_pages,
+        "text_len": total_text_len,
+    }
 
 
 def _should_finalize_queue(

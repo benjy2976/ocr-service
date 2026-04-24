@@ -3,6 +3,7 @@
 Objetivo actual:
 - generar un `PDF searchable` con la imagen original intacta
 - usar OCR principalmente para busqueda documental
+- producir un artefacto `text` en JSON por pagina para indexacion
 - controlar mejor el texto falso introducido por sellos, logos, firmas y huellas
 
 Estado del proyecto:
@@ -14,6 +15,7 @@ Estado del proyecto:
 ## Enfoque
 - OCR oficial: OCRmyPDF + Tesseract
 - Salida final: PDF searchable con imagen original intacta
+- Artefacto textual: `{source_md5}.json` reportado como `artifacts.text`
 - Servicio: FastAPI
 - Vision auxiliar:
   - detector de sellos / logos / firmas
@@ -132,7 +134,8 @@ pull-next (POST) → 204 → esperar → reintentar
                  → item → mark_processing (POST)
                         → download source (GET)
                         → OCR local
-                        → complete (POST, multipart)   ← OK
+                        → publicar pdf/text en cache compartido
+                        → artifacts (POST, JSON)       ← OK
                         → fail    (POST, JSON)         ← error
 ```
 
@@ -155,6 +158,63 @@ derivado de `OCR_WORKER_NAME` para que Munis y los logs distingan los leases.
 | app/worker.py            | Loop de polling y lógica del worker |
 | worker_entrypoint.py     | Entry point del contenedor ocr-worker |
 | .env.example             | Plantilla de variables de entorno |
+
+### Artefacto TEXT para busqueda
+
+El artefacto textual canonico es `text`.
+
+Ruta fisica:
+
+```text
+{artifacts_dir}/{source_md5}.json
+```
+
+El worker resuelve la ruta desde `artifacts.expected.text_path`.
+
+Formato: JSON UTF-8, con metadatos del documento en la raiz y paginas en
+`pages`.
+
+```json
+{
+  "schema": "ocr.text.document.v1",
+  "page_count": 3,
+  "non_empty_pages": 2,
+  "text_len": 44,
+  "text_source_kind": "ocr_pdf",
+  "extraction_engine": "pymupdf",
+  "pages": [
+    {
+      "page": 1,
+      "text": "Texto de la pagina 1",
+      "char_count": 22,
+      "word_count": 5,
+      "empty": false
+    },
+    {
+      "page": 2,
+      "text": "Texto de la pagina 2",
+      "char_count": 22,
+      "word_count": 5,
+      "empty": false
+    },
+    {
+      "page": 3,
+      "text": "",
+      "char_count": 0,
+      "word_count": 0,
+      "empty": true
+    }
+  ]
+}
+```
+
+Reporte canonico:
+
+```json
+{"artifacts":{"text":true},"finalize_queue":true}
+```
+
+El contrato canonico del worker solo acepta `text` para el artefacto textual.
 
 - POST /ocr/local
   Procesa un PDF que ya existe en el filesystem del contenedor.

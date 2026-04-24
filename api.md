@@ -163,6 +163,86 @@ Rutas asociadas:
 - `GET /models/test/page.png?pdf=...&page=...`
 - `GET /models/test/infer?pdf=...&page=...&kind=text|stamps`
 
+## Contrato de artefactos del worker
+
+El worker consume el contrato `artifacts.requested` / `artifacts.expected` que
+entrega Munis en la cola.
+
+Ejemplo:
+
+```json
+{
+  "artifacts": {
+    "requested": {
+      "pdf": true,
+      "text": true,
+      "md": false
+    },
+    "expected": {
+      "dir": "2026/119170",
+      "pdf_path": "2026/119170/hash.pdf",
+      "text_path": "2026/119170/hash.json",
+      "md_path": "2026/119170/hash.md"
+    }
+  }
+}
+```
+
+`text_path` es la ruta canonica del artefacto textual.
+
+Reporte esperado:
+
+```json
+{
+  "artifacts": {
+    "text": true
+  },
+  "finalize_queue": true
+}
+```
+
+### Formato del artefacto `text`
+
+El archivo `text` es JSON UTF-8. Los metadatos del documento van en la raiz y
+el contenido de paginas va en `pages`:
+
+```json
+{
+  "schema": "ocr.text.document.v1",
+  "page_count": 3,
+  "non_empty_pages": 2,
+  "text_len": 44,
+  "text_source_kind": "ocr_pdf",
+  "extraction_engine": "pymupdf",
+  "pages": [
+    {
+      "page": 1,
+      "text": "Texto de la pagina 1",
+      "char_count": 22,
+      "word_count": 5,
+      "empty": false
+    },
+    {
+      "page": 2,
+      "text": "Texto de la pagina 2",
+      "char_count": 22,
+      "word_count": 5,
+      "empty": false
+    },
+    {
+      "page": 3,
+      "text": "",
+      "char_count": 0,
+      "word_count": 0,
+      "empty": true
+    }
+  ]
+}
+```
+
+El indexador debe consumir este archivo como fuente primaria para busqueda por
+pagina o por chunks.
+
 ## GET /file/{filename}
 Descarga el PDF con OCR aplicado.
 

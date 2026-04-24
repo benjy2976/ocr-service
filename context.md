@@ -8,7 +8,8 @@ Aplicar OCR a un volumen grande de PDFs escaneados para busqueda documental.
 
 El entregable principal es:
 - un `PDF searchable` con la imagen original intacta
-- y, mas adelante, una salida textual derivada (`txt`, `md` o indice de busqueda)
+- un artefacto textual `text` en JSON por pagina para indexacion
+- y, mas adelante, una salida `md` derivada para consumo estructurado
 
 La prioridad funcional no es "limpiar visualmente" el documento sino:
 - extraer texto util
