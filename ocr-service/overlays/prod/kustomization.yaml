@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ocr-service
+
+resources:
+  - ../../base
+  - ../../storage
+
+patches:
+  - path: 10-patch-api.yaml
+  - path: 11-patch-worker-placement.yaml
+
+images:
+  - name: ryuk89/ocr-service
+    newName: ryuk89/ocr-service
+    newTag: 20260424-01

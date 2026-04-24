@@ -1,0 +1,14 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ocr-api
+  namespace: ocr-service
+spec:
+  replicas: 1
+  template:
+    spec:
+      containers:
+        - name: api
+          env:
+            - name: PUBLIC_BASE_URL
+              value: https://ocr.example.local

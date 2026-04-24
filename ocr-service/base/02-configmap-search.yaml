@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ocr-search-config
+  namespace: ocr-service
+data:
+  OCR_SHARED_CACHE_DIR: /nfs-cache
+  OPENSEARCH_URL: http://opensearch:9200
+  OPENSEARCH_INDEX: munis_ocr_pages
+  SEARCH_INDEXER_POLL_INTERVAL_SECONDS: "300"
+  SEARCH_INDEXER_BATCH_SIZE: "500"
+  SEARCH_INDEXER_LOG_LEVEL: INFO
+  OPENSEARCH_TIMEOUT_SECONDS: "30"
+  OPENSEARCH_MAX_RETRIES: "3"
+  OPENSEARCH_SHARDS: "1"
+  OPENSEARCH_REPLICAS: "0"

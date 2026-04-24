@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ocr-worker
+  namespace: ocr-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ocr-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ocr-worker
+        app.kubernetes.io/part-of: ocr-service
+    spec:
+      initContainers:
+        - name: seed-models
+          image: ryuk89/ocr-service:20260424-01
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - >-
+              mkdir -p /data/models /data/out/text_pages/models &&
+              cp -n /app/bundled-models/stamp/*.pt /data/models/ 2>/dev/null || true &&
+              cp -n /app/bundled-models/text_pages/*.pt /data/out/text_pages/models/ 2>/dev/null || true
+          volumeMounts:
+            - name: ocr-data
+              mountPath: /data
+      containers:
+        - name: worker
+          image: ryuk89/ocr-service:20260424-01
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "-m", "app.worker_main"]
+          envFrom:
+            - configMapRef:
+                name: ocr-service-config
+            - secretRef:
+                name: ocr-service-secret
+          env:
+            - name: OCR_TEXT_BLOCK_MODEL_PATH
+              value: /data/out/text_pages/models/text_block_20260324_175831_v5_s_b6.pt
+          resources:
+            requests:
+              cpu: "1000m"
+              memory: "4Gi"
+            limits:
+              cpu: "4"
+              memory: "12Gi"
+          volumeMounts:
+            - name: ocr-data
+              mountPath: /data
+            - name: ocr-shared-cache
+              mountPath: /nfs-cache
+            - name: tmp
+              mountPath: /tmp
+            - name: ocr-tmp
+              mountPath: /data/tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+      volumes:
+        - name: ocr-data
+          persistentVolumeClaim:
+            claimName: ocr-data
+        - name: ocr-shared-cache
+          persistentVolumeClaim:
+            claimName: ocr-shared-cache
+        - name: tmp
+          emptyDir:
+            medium: Memory
+        - name: ocr-tmp
+          emptyDir:
+            medium: Memory

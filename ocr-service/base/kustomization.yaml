@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - 00-namespace.yaml
+  - 01-configmap-ocr.yaml
+  - 02-configmap-search.yaml
+  - 03-secret.example.yaml
+  - 04-service-api.yaml
+  - 05-deployment-api.yaml
+  - 06-deployment-worker.yaml
+  - 07-service-search-api.yaml
+  - 08-deployment-search-api.yaml
+  - 09-deployment-search-indexer.yaml
+  - 10-service-opensearch.yaml
+  - 11-statefulset-opensearch.yaml

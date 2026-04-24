@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ocr-worker
+  namespace: ocr-service
+spec:
+  replicas: 1
+  template:
+    spec:
+      nodeSelector:
+        accelerator: ia
+        kubernetes.io/hostname: nodo3
+      tolerations:
+        - key: workload
+          operator: Equal
+          value: db-ia
+          effect: NoSchedule
+      containers:
+        - name: worker
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: compute,utility

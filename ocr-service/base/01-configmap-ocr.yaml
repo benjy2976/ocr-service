@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ocr-service-config
+  namespace: ocr-service
+data:
+  OCR_TMP_DIR: /data/tmp
+  OCR_OUT_DIR: /data/out
+  OCR_WORK_DIR: /data/tmp/work
+  OCR_SHARED_CACHE_DIR: /nfs-cache
+  TMPDIR: /data/tmp
+  TMP: /data/tmp
+  TEMP: /data/tmp
+  OCR_LANG: spa
+  OCR_MODE: searchable_cpu
+  REVIEW_APP_VERSION: "1.2"
+  CLASSIFY_DIR: /data/classify
+  CLASSIFY_CONF_THRESHOLD: "0.99"
+  STAMP_MODEL_PATH: /data/models/stamp_detector_v2.pt
+  OCR_WORKER_NAME: ocr-worker-1
+  OCR_WORKER_CONCURRENCY: "1"
+  OCR_POLL_INTERVAL_SECONDS: "10"
+  OCR_WORKER_ENABLED: "true"
+  OCR_CALLBACK_TIMEOUT_SECONDS: "30"
+  OCR_DOWNLOAD_TIMEOUT_SECONDS: "120"
+  OCR_WORKER_MAX_CONSECUTIVE_ERRORS: "20"
+  OCR_WORKER_LOG_LEVEL: INFO

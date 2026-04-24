@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ocr-search-indexer
+  namespace: ocr-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ocr-search-indexer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ocr-search-indexer
+        app.kubernetes.io/part-of: ocr-service
+    spec:
+      containers:
+        - name: search-indexer
+          image: ryuk89/ocr-service:20260424-01
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "-m", "app.search_indexer"]
+          envFrom:
+            - configMapRef:
+                name: ocr-search-config
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "2Gi"
+          volumeMounts:
+            - name: ocr-shared-cache
+              mountPath: /nfs-cache
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+      volumes:
+        - name: ocr-shared-cache
+          persistentVolumeClaim:
+            claimName: ocr-shared-cache
