@@ -142,7 +142,7 @@ Notas:
 Segundo control de paginas ya validadas.
 
 Notas:
-- usa orden estable segun `state.json`
+- usa orden estable segun `state.jsonl`
 - guarda correcciones en `labels_qc`
 - no afecta la cola principal de revision
 
@@ -181,7 +181,7 @@ Ejemplo:
     "expected": {
       "dir": "2026/119170",
       "pdf_path": "2026/119170/hash.pdf",
-      "text_path": "2026/119170/hash.json",
+      "text_path": "2026/119170/hash.jsonl",
       "md_path": "2026/119170/hash.md"
     }
   }
@@ -203,8 +203,11 @@ Reporte esperado:
 
 ### Formato del artefacto `text`
 
-El archivo `text` es JSON UTF-8. Los metadatos del documento van en la raiz y
+El archivo `text` es JSONL UTF-8. Los metadatos del documento van en la raiz y
 el contenido de paginas va en `pages`:
+
+El archivo físico contiene un único objeto JSON en una sola línea terminada en
+`\n`. El ejemplo está expandido para lectura.
 
 ```json
 {
@@ -214,6 +217,21 @@ el contenido de paginas va en `pages`:
   "text_len": 44,
   "text_source_kind": "ocr_pdf",
   "extraction_engine": "pymupdf",
+  "metadata": {
+    "regulation_file_id": 88656,
+    "regulation_id": 97539,
+    "source_md5": "abcdef1234567890abcdef1234567890",
+    "pdf_path": "2021/88656/abcdef1234567890abcdef1234567890.pdf",
+    "text_path": "2021/88656/abcdef1234567890abcdef1234567890.jsonl",
+    "reg_year": 2021,
+    "reg_num": 237,
+    "reg_title": "Resolucion Gerencial Regional GRI 000237-2021-GRH/GRI.",
+    "reg_description": "Descripcion de la norma...",
+    "regulations_tipo": 49,
+    "regulations_tipos_sigla_id": 51,
+    "regulation_type_id": 49,
+    "regulation_type_sigla_id": 51
+  },
   "pages": [
     {
       "page": 1,
@@ -242,6 +260,54 @@ el contenido de paginas va en `pages`:
 
 El indexador debe consumir este archivo como fuente primaria para busqueda por
 pagina o por chunks.
+
+## API de busqueda
+
+Base URL local: `http://localhost:18020`
+
+### GET /search
+
+Parametros:
+- `q`: texto de busqueda
+- `limit`: cantidad de resultados, default `10`
+- `offset`: desplazamiento para paginacion
+- `regulation_file_id`: filtro opcional
+- `regulation_id`: filtro opcional
+- `year`: filtro opcional por `reg_year`
+- `tipo`: filtro opcional por `regulations_tipo`
+- `sigla_id`: filtro opcional por `regulation_type_sigla_id`
+- `regulation_type_id`: filtro opcional por tipo de norma
+- `regulation_type_sigla_id`: filtro opcional por sigla de tipo de norma
+
+Ejemplo:
+
+```bash
+curl 'http://localhost:18020/search?q=liquidacion&year=2021'
+```
+
+Respuesta:
+
+```json
+{
+  "query": "liquidacion",
+  "total": 1,
+  "limit": 10,
+  "offset": 0,
+  "results": [
+    {
+      "regulation_file_id": 88656,
+      "regulation_id": 97539,
+      "page": 1,
+      "score": 12.3,
+      "text_path": "2021/88656/hash.jsonl",
+      "pdf_path": "2021/88656/hash.pdf",
+      "highlight": {
+        "text": ["...<mark>Liquidación</mark> Financiera..."]
+      }
+    }
+  ]
+}
+```
 
 ## GET /file/{filename}
 Descarga el PDF con OCR aplicado.

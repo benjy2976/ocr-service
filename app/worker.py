@@ -330,6 +330,7 @@ def _process_item(item: dict, worker_name: str, worker_logger: logging.Logger) -
                 text_content, text_stats = _generate_text_from_pdf(
                     base_pdf_path,
                     text_source_kind=resolved_text_source_kind,
+                    metadata=_text_artifact_metadata(payload, shared_pdf_path, shared_text_path),
                 )
                 _publish_text_to_shared_cache(text_content, shared_text_path)
                 text_cached = True
@@ -545,10 +546,77 @@ def _publish_text_to_shared_cache(content: str, target_path: Path) -> None:
     os.replace(tmp_target, target_path)
 
 
+def _text_artifact_metadata(
+    payload: dict,
+    pdf_path: Path | None,
+    text_path: Path | None,
+) -> dict[str, Any]:
+    queue = payload.get("queue") if isinstance(payload.get("queue"), dict) else {}
+    regulation_file = (
+        queue.get("regulation_file")
+        if isinstance(queue.get("regulation_file"), dict)
+        else {}
+    )
+    regulation = (
+        regulation_file.get("regulation")
+        if isinstance(regulation_file.get("regulation"), dict)
+        else {}
+    )
+    document = payload.get("document") if isinstance(payload.get("document"), dict) else {}
+    source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+
+    regulation_file_id = (
+        payload.get("regulation_file_id")
+        or queue.get("regulation_file_id")
+        or regulation_file.get("id")
+    )
+    regulation_id = (
+        document.get("regulation_id")
+        or regulation_file.get("file_idregulation")
+        or regulation.get("id")
+    )
+    source_md5 = (
+        payload.get("source_md5")
+        or queue.get("source_md5")
+        or source.get("md5")
+        or regulation_file.get("file_md5")
+    )
+
+    return {
+        "regulation_file_id": regulation_file_id,
+        "regulation_id": regulation_id,
+        "source_md5": source_md5,
+        "pdf_path": _shared_cache_relative_path(pdf_path),
+        "text_path": _shared_cache_relative_path(text_path),
+        "source_path": source.get("path") or queue.get("source_path"),
+        "file_name": regulation_file.get("file_name"),
+        "file_size": regulation_file.get("file_size") or source.get("size"),
+        "reg_num": document.get("reg_num") or regulation.get("reg_num"),
+        "reg_year": document.get("reg_year") or regulation.get("reg_year"),
+        "reg_date": regulation.get("reg_date"),
+        "reg_title": regulation.get("reg_title"),
+        "reg_description": regulation.get("reg_description"),
+        "regulations_tipo": document.get("regulations_tipo") or regulation.get("regulations_tipo"),
+        "regulations_tipos_sigla_id": regulation.get("regulations_tipos_sigla_id"),
+        "regulation_type_id": document.get("regulations_tipo") or regulation.get("regulations_tipo"),
+        "regulation_type_sigla_id": regulation.get("regulations_tipos_sigla_id"),
+    }
+
+
+def _shared_cache_relative_path(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        return str(path.resolve().relative_to(SHARED_CACHE_DIR.resolve()))
+    except ValueError:
+        return str(path)
+
+
 def _generate_text_from_pdf(
     pdf_path: Path,
     *,
     text_source_kind: str,
+    metadata: dict[str, Any],
 ) -> tuple[str, dict[str, int]]:
     extracted_pages = _extract_text_pages(pdf_path)
     page_count = len(extracted_pages)
@@ -583,10 +651,11 @@ def _generate_text_from_pdf(
         "text_len": total_text_len,
         "text_source_kind": text_source_kind,
         "extraction_engine": "pymupdf",
+        "metadata": metadata,
         "pages": pages,
     }
 
-    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n", {
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n", {
         "page_count": page_count,
         "non_empty_pages": non_empty_pages,
         "text_len": total_text_len,

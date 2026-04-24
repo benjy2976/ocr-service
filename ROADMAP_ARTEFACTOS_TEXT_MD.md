@@ -10,7 +10,7 @@ para indexación documental por página y, más adelante, para derivar `md`.
 Artefactos esperados:
 
 - `pdf`: `{artifacts_dir}/{source_md5}.pdf`
-- `text`: `{artifacts_dir}/{source_md5}.json`
+- `text`: `{artifacts_dir}/{source_md5}.jsonl`
 - `md`: `{artifacts_dir}/{source_md5}.md`
 
 La ruta principal del artefacto textual es `text_path`.
@@ -28,7 +28,7 @@ Ejemplo de payload:
     "expected": {
       "dir": "2026/119170",
       "pdf_path": "2026/119170/hash.pdf",
-      "text_path": "2026/119170/hash.json",
+      "text_path": "2026/119170/hash.jsonl",
       "md_path": "2026/119170/hash.md"
     }
   }
@@ -48,10 +48,13 @@ Reporte esperado:
 
 El worker acepta y reporta canónicamente `artifacts.text`.
 
-## Formato TEXT JSON
+## Formato TEXT JSONL
 
-El archivo físico de `text` es JSON UTF-8. Los metadatos del documento van en
+El archivo físico de `text` es JSONL UTF-8. Los metadatos del documento van en
 el objeto raíz y el contenido de páginas va en el arreglo `pages`.
+
+El archivo físico contiene un único objeto JSON en una sola línea terminada en
+`\n`. El ejemplo está expandido para lectura.
 
 Ejemplo con varias páginas:
 
@@ -63,6 +66,21 @@ Ejemplo con varias páginas:
   "text_len": 42,
   "text_source_kind": "ocr_pdf",
   "extraction_engine": "pymupdf",
+  "metadata": {
+    "regulation_file_id": 88656,
+    "regulation_id": 97539,
+    "source_md5": "abcdef1234567890abcdef1234567890",
+    "pdf_path": "2021/88656/abcdef1234567890abcdef1234567890.pdf",
+    "text_path": "2021/88656/abcdef1234567890abcdef1234567890.jsonl",
+    "reg_year": 2021,
+    "reg_num": 237,
+    "reg_title": "Resolucion Gerencial Regional GRI 000237-2021-GRH/GRI.",
+    "reg_description": "Descripcion de la norma...",
+    "regulations_tipo": 49,
+    "regulations_tipos_sigla_id": 51,
+    "regulation_type_id": 49,
+    "regulation_type_sigla_id": 51
+  },
   "pages": [
     {
       "page": 1,
@@ -100,6 +118,7 @@ Campos:
   - `ocr_pdf`: texto derivado del PDF searchable generado por OCR.
   - `shared_cache_text`: artefacto `text` reutilizado desde cache.
 - `extraction_engine`: motor usado para leer la capa textual. Valor actual: `pymupdf`.
+- `metadata`: IDs y datos descriptivos recibidos desde el payload de Munis.
 - `pages`: arreglo de páginas extraídas.
 
 Campos de cada página:
@@ -138,7 +157,9 @@ Reglas:
 
 ## Relación con búsqueda
 
-El futuro `search-indexer` debe consumir `{source_md5}.json` como fuente primaria.
+El futuro `search-indexer` debe consumir `{source_md5}.jsonl` como fuente primaria.
+Como el JSONL ya incluye `metadata.regulation_file_id` y `metadata.regulation_id`,
+no se requiere una API adicional de Munis para resolver IDs durante la indexación.
 
 Flujo recomendado:
 
@@ -148,9 +169,12 @@ ocr-worker
   -> reporta artifacts.text=true
 search-indexer
   -> lee text_path
-  -> lee JSON
+  -> lee JSONL
   -> recorre pages
   -> indexa por página o por chunk en OpenSearch
+ocr-search-api
+  -> consulta OpenSearch
+  -> responde regulation_file_id y regulation_id
 ```
 
 Documento sugerido para OpenSearch:
@@ -160,7 +184,7 @@ Documento sugerido para OpenSearch:
   "document_id": 119170,
   "source_md5": "abcdef1234567890abcdef1234567890",
   "pdf_path": "2026/119170/abcdef1234567890abcdef1234567890.pdf",
-  "text_path": "2026/119170/abcdef1234567890abcdef1234567890.json",
+  "text_path": "2026/119170/abcdef1234567890abcdef1234567890.jsonl",
   "page": 1,
   "chunk_index": 0,
   "text": "Texto indexable...",
@@ -190,5 +214,5 @@ consumo por agentes o lectura estructurada.
    - `pdf + text`
    - cache hit de `text`
 2. Implementar `md`.
-3. Crear `search-indexer`.
-4. Definir índice OpenSearch y estrategia de chunks.
+3. Mejorar estrategia de chunks sobre páginas largas.
+4. Definir política de reindexación incremental cuando cambie el artefacto `text`.

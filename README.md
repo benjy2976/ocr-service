@@ -3,7 +3,7 @@
 Objetivo actual:
 - generar un `PDF searchable` con la imagen original intacta
 - usar OCR principalmente para busqueda documental
-- producir un artefacto `text` en JSON por pagina para indexacion
+- producir un artefacto `text` en JSONL por pagina para indexacion
 - controlar mejor el texto falso introducido por sellos, logos, firmas y huellas
 
 Estado del proyecto:
@@ -15,7 +15,7 @@ Estado del proyecto:
 ## Enfoque
 - OCR oficial: OCRmyPDF + Tesseract
 - Salida final: PDF searchable con imagen original intacta
-- Artefacto textual: `{source_md5}.json` reportado como `artifacts.text`
+- Artefacto textual: `{source_md5}.jsonl` reportado como `artifacts.text`
 - Servicio: FastAPI
 - Vision auxiliar:
   - detector de sellos / logos / firmas
@@ -166,13 +166,16 @@ El artefacto textual canonico es `text`.
 Ruta fisica:
 
 ```text
-{artifacts_dir}/{source_md5}.json
+{artifacts_dir}/{source_md5}.jsonl
 ```
 
 El worker resuelve la ruta desde `artifacts.expected.text_path`.
 
-Formato: JSON UTF-8, con metadatos del documento en la raiz y paginas en
+Formato: JSONL UTF-8, con metadatos del documento en la raiz y paginas en
 `pages`.
+
+El archivo físico se escribe como un único objeto JSON en una sola línea
+terminada en `\n`. El ejemplo siguiente está expandido solo para lectura.
 
 ```json
 {
@@ -215,6 +218,54 @@ Reporte canonico:
 ```
 
 El contrato canonico del worker solo acepta `text` para el artefacto textual.
+
+El JSONL incluye un objeto `metadata` con los IDs y campos de Munis necesarios
+para busqueda:
+- `regulation_file_id`
+- `regulation_id`
+- `source_md5`
+- `pdf_path`
+- `text_path`
+- `reg_year`
+- `reg_num`
+- `reg_title`
+- `reg_description`
+- `regulations_tipo`
+- `regulations_tipos_sigla_id`
+- `regulation_type_id`
+- `regulation_type_sigla_id`
+
+Con esos datos el indexador puede responder con IDs de `files` y `regulations`
+sin consultar una API adicional de Munis.
+
+### Busqueda documental
+
+Servicios:
+- `opensearch`: motor de busqueda.
+- `ocr-search-indexer`: lee `/nfs-cache/**/*.jsonl` y carga paginas a OpenSearch.
+- `ocr-search-api`: expone busqueda HTTP en `http://localhost:18020`.
+
+Levantar:
+
+```bash
+docker compose up -d --build opensearch ocr-search-api ocr-search-indexer
+```
+
+Indexar una vez manualmente:
+
+```bash
+docker compose run --rm ocr-search-indexer \
+  python3 -m app.search_indexer --once
+```
+
+Buscar:
+
+```bash
+curl 'http://localhost:18020/search?q=liquidacion&year=2021'
+```
+
+La respuesta incluye `regulation_file_id`, `regulation_id`, pagina, score,
+rutas de artefactos y fragmentos resaltados.
 
 - POST /ocr/local
   Procesa un PDF que ya existe en el filesystem del contenedor.

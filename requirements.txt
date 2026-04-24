@@ -9,5 +9,6 @@ python-multipart==0.0.9
 opencv-python==4.10.0.84
 numpy==1.26.4
 ultralytics==8.4.14
+opensearch-py==2.7.1
 # paddleocr y paddlepaddle se instalan en el Dockerfile con --no-deps
 # para evitar conflicto con opencv. No agregar aquí.

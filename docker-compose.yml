@@ -1,6 +1,72 @@
 services:
 
   # ─────────────────────────────────────────────────────────────────────────────
+  # opensearch: motor de busqueda documental
+  # Puerto externo: 19200 → interno: 9200
+  # ─────────────────────────────────────────────────────────────────────────────
+  opensearch:
+    image: opensearchproject/opensearch:2.15.0
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms1g -Xmx1g"
+      bootstrap.memory_lock: "true"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "19200:9200"
+      - "19600:9600"
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    networks:
+      - grh_network
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # ocr-search-api: API de busqueda sobre OpenSearch
+  # Puerto externo: 18020 → interno: 8000
+  # ─────────────────────────────────────────────────────────────────────────────
+  ocr-search-api:
+    build: .
+    ports:
+      - "18020:8000"
+    environment:
+      OPENSEARCH_URL: ${OPENSEARCH_URL:-http://opensearch:9200}
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-munis_ocr_pages}
+    networks:
+      - grh_network
+    command: ["uvicorn", "app.search_api:app", "--host", "0.0.0.0", "--port", "8000"]
+    depends_on:
+      - opensearch
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # ocr-search-indexer: indexa artefactos text JSON desde ocr_nfs_cache
+  # ─────────────────────────────────────────────────────────────────────────────
+  ocr-search-indexer:
+    build: .
+    environment:
+      OCR_SHARED_CACHE_DIR: /nfs-cache
+      OPENSEARCH_URL: ${OPENSEARCH_URL:-http://opensearch:9200}
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-munis_ocr_pages}
+      SEARCH_INDEXER_POLL_INTERVAL_SECONDS: ${SEARCH_INDEXER_POLL_INTERVAL_SECONDS:-300}
+      SEARCH_INDEXER_BATCH_SIZE: ${SEARCH_INDEXER_BATCH_SIZE:-500}
+      SEARCH_INDEXER_LOG_LEVEL: ${SEARCH_INDEXER_LOG_LEVEL:-INFO}
+    volumes:
+      - ocr_nfs_cache:/nfs-cache:ro
+    networks:
+      - grh_network
+    command: ["python3", "-m", "app.search_indexer"]
+    depends_on:
+      - opensearch
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────────────────────────────────────
   # ocr-api: API HTTP on-demand (FastAPI)
   # Puerto externo: 18010 → interno: 8000
   # ─────────────────────────────────────────────────────────────────────────────
@@ -92,6 +158,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  opensearch_data:
   ocr_nfs_cache:
     driver: local
     driver_opts:
