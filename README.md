@@ -264,6 +264,24 @@ Buscar:
 curl 'http://localhost:18020/search?q=liquidacion&year=2021'
 ```
 
+Listar ultimos documentos sin texto de busqueda:
+
+```bash
+curl 'http://localhost:18020/search?page=1&per_page=20'
+```
+
+Buscar con paginacion y fecha descendente:
+
+```bash
+curl 'http://localhost:18020/search?q=liquidacion&page=1&per_page=20&sort=-reg_date'
+```
+
+Ampliar fragmentos resaltados:
+
+```bash
+curl 'http://localhost:18020/search?q=liquidacion&highlight_fragment_size=300&highlight_fragments=4'
+```
+
 La respuesta incluye `regulation_id`, archivos coincidentes, paginas, score,
 rutas de artefactos y fragmentos resaltados.
 Por defecto devuelve una sola vez cada norma (`group_by=regulation`), con

@@ -295,6 +295,10 @@ Respuesta:
 
 Busca texto OCR indexado por página.
 
+Si `q` no se envía o viene vacío, el endpoint funciona como listado paginado:
+devuelve documentos según filtros, ordenados por fecha descendente por defecto y
+sin fragmentos resaltados.
+
 Método: `GET`
 
 Content-Type de respuesta: `application/json`
@@ -303,9 +307,13 @@ Parámetros query:
 
 | Parámetro | Tipo | Requerido | Default | Descripción |
 |-----------|------|-----------|---------|-------------|
-| `q` | string | sí | - | Texto de búsqueda. Mínimo 1 carácter. |
-| `limit` | integer | no | `10` | Cantidad de resultados. Mínimo `1`, máximo `100`. |
-| `offset` | integer | no | `0` | Desplazamiento para paginación. |
+| `q` | string | no | - | Texto de búsqueda. Si se omite o viene vacío, la API lista documentos con filtros y ordenamiento, sin highlights. |
+| `page` | integer | no | `1` | Número de página, base 1. Tiene prioridad sobre `offset` si se envía. |
+| `per_page` | integer | no | `10` | Cantidad de resultados por página. Mínimo `1`, máximo `100`. |
+| `limit` | integer | no | `10` | Alias compatible para cantidad de resultados. Se usa si no se envía `per_page`. |
+| `offset` | integer | no | `0` | Desplazamiento compatible para paginación. Se usa si no se envía `page`. |
+| `sort` | string | no | `-score` en búsqueda, `-reg_date` en listado | Ordenamiento. Valores: `-score`, `score`, `-reg_date`, `reg_date`, `-reg_year`, `reg_year`, `-reg_num`, `reg_num`. El prefijo `-` indica descendente. |
+| `sort_by` | string | no | - | Alias opcional: `relevance`, `date_desc`, `date_asc`, `year_desc`, `year_asc`, `num_desc`, `num_asc`. Si se envía, tiene prioridad sobre `sort`. |
 | `regulation_file_id` | integer | no | - | Filtra por ID del archivo de norma. |
 | `regulation_id` | integer | no | - | Filtra por ID de la norma. |
 | `year` | integer | no | - | Filtra por `reg_year`. |
@@ -316,11 +324,37 @@ Parámetros query:
 | `group_by` | string | no | `regulation` | `regulation` devuelve una sola vez cada norma; `file` devuelve una vez cada archivo; `page` devuelve una fila por página encontrada. `document` se acepta como alias de `file`. |
 | `matched_files_limit` | integer | no | `10` | Máximo de archivos coincidentes inspeccionados dentro de cada norma cuando `group_by=regulation`. Mínimo `1`, máximo `50`. |
 | `matched_pages_limit` | integer | no | `5` | Máximo de páginas coincidentes incluidas dentro de cada archivo cuando `group_by=regulation` o `group_by=file`. Mínimo `1`, máximo `20`. |
+| `highlight_fragment_size` | integer | no | `180` | Tamaño aproximado de cada fragmento resaltado del texto OCR. Mínimo `80`, máximo `500`. |
+| `highlight_fragments` | integer | no | `3` | Cantidad máxima de fragmentos resaltados por campo `text`. Mínimo `1`, máximo `5`. |
 
 Ejemplo:
 
 ```bash
 curl 'http://localhost:18020/search?q=liquidacion&year=2021'
+```
+
+Ejemplo para listar últimos documentos sin texto de búsqueda:
+
+```bash
+curl 'http://localhost:18020/search?page=1&per_page=20'
+```
+
+Ejemplo para listar últimos documentos de un tipo:
+
+```bash
+curl 'http://localhost:18020/search?regulation_type_id=49&page=1&per_page=20'
+```
+
+Ejemplo con paginación estilo Laravel y fecha descendente:
+
+```bash
+curl 'http://localhost:18020/search?q=walther%20aguirre&group_by=regulation&page=1&per_page=20&sort=-reg_date'
+```
+
+Ejemplo con fragmentos resaltados más largos:
+
+```bash
+curl 'http://localhost:18020/search?q=walther%20aguirre&group_by=regulation&page=1&per_page=20&sort=-reg_date&highlight_fragment_size=300&highlight_fragments=4'
 ```
 
 Ejemplo con filtros de tipo:
@@ -345,12 +379,33 @@ Respuesta:
 
 ```json
 {
+  "mode": "search",
   "query": "liquidacion",
   "group_by": "regulation",
+  "sort": "-reg_date",
+  "highlight_fragment_size": 300,
+  "highlight_fragments": 4,
   "total": 1,
   "total_page_matches": 7,
-  "limit": 10,
+  "limit": 20,
   "offset": 0,
+  "per_page": 20,
+  "current_page": 1,
+  "last_page": 1,
+  "from": 1,
+  "to": 1,
+  "next_page": null,
+  "prev_page": null,
+  "pagination": {
+    "total": 1,
+    "per_page": 20,
+    "current_page": 1,
+    "last_page": 1,
+    "from": 1,
+    "to": 1,
+    "next_page": null,
+    "prev_page": null
+  },
   "results": [
     {
       "regulation_file_id": 88656,
@@ -430,14 +485,21 @@ Respuesta:
 
 Campos principales de respuesta:
 
-- `query`: texto buscado.
+- `mode`: `search` cuando se envía `q`; `list` cuando no hay texto de búsqueda.
+- `query`: texto buscado, o `null` en modo listado.
 - `group_by`: modo de agrupación aplicado.
+- `sort`: ordenamiento aplicado.
+- `highlight_fragment_size`: tamaño de fragmento resaltado aplicado.
+- `highlight_fragments`: número máximo de fragmentos resaltados aplicado.
 - `total`: si `group_by=regulation`, total aproximado de normas encontradas;
   si `group_by=file`, total aproximado de archivos encontrados; si
   `group_by=page`, total de páginas encontradas.
 - `total_page_matches`: total de páginas coincidentes antes de agrupar.
 - `limit`: límite aplicado.
 - `offset`: desplazamiento aplicado.
+- `per_page`, `current_page`, `last_page`, `from`, `to`, `next_page`,
+  `prev_page`: metadatos de paginación estilo paginator.
+- `pagination`: los mismos metadatos de paginación agrupados en un objeto.
 - `results`: arreglo de resultados por página indexada.
 - `results[].regulation_file_id`: ID del archivo en Munis.
 - `results[].regulation_id`: ID de la norma en Munis.
@@ -456,6 +518,18 @@ Campos principales de respuesta:
 Notas de integración:
 
 - Por defecto cada resultado representa una norma única (`regulation_id`).
+- En modo búsqueda, el orden por defecto es relevancia descendente
+  (`sort=-score`).
+- En modo listado, el orden por defecto es fecha de norma descendente
+  (`sort=-reg_date`).
+- Para ordenar por fecha de norma descendente, usar `sort=-reg_date`.
+- La paginación por `page`/`per_page` es preferida para integraciones tipo
+  Laravel. `limit`/`offset` se mantiene por compatibilidad.
+- Los fragmentos resaltados del OCR se pueden ampliar con
+  `highlight_fragment_size` y `highlight_fragments`. La API limita esos valores
+  para evitar consultas excesivamente pesadas sobre OpenSearch.
+- En modo listado (`q` vacío), no se generan highlights porque no hay términos
+  coincidentes.
 - Si una norma tiene dos o más archivos con coincidencias, aparecerá una sola
   vez y esos archivos estarán en `matched_files`.
 - Para ver cada archivo como resultado independiente, usar `group_by=file`.
@@ -469,8 +543,8 @@ Notas de integración:
 
 Errores comunes:
 
-- `422 Unprocessable Entity`: falta `q`, `limit` está fuera de rango o algún
-  filtro numérico no es entero.
+- `422 Unprocessable Entity`: paginación fuera de rango, `sort` no soportado,
+  parámetros de highlight fuera de rango o algún filtro numérico no es entero.
 - `500 Internal Server Error`: OpenSearch no está disponible o el índice no se
   pudo crear/consultar.
 
@@ -480,7 +554,11 @@ Ejemplo de integración desde JavaScript:
 const params = new URLSearchParams({
   q: 'liquidacion',
   year: '2021',
-  limit: '20'
+  page: '1',
+  per_page: '20',
+  sort: '-reg_date',
+  highlight_fragment_size: '300',
+  highlight_fragments: '4'
 });
 
 const res = await fetch(`http://localhost:18020/search?${params}`);

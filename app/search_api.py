@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Literal
 from typing import Any
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 
 from app.search_common import OPENSEARCH_INDEX, ensure_index, opensearch_client
 
@@ -23,9 +23,13 @@ def health():
 
 @app.get("/search")
 def search(
-    q: str = Query(..., min_length=1),
-    limit: int = Query(10, ge=1, le=100),
-    offset: int = Query(0, ge=0),
+    q: str | None = Query(None),
+    limit: int | None = Query(None, ge=1, le=100),
+    offset: int | None = Query(None, ge=0),
+    page: int | None = Query(None, ge=1),
+    per_page: int | None = Query(None, ge=1, le=100),
+    sort: str | None = Query(None, min_length=1),
+    sort_by: str | None = Query(None, min_length=1),
     regulation_file_id: int | None = None,
     regulation_id: int | None = None,
     year: int | None = None,
@@ -36,9 +40,21 @@ def search(
     group_by: Literal["regulation", "file", "page", "document"] = "regulation",
     matched_files_limit: int = Query(10, ge=1, le=50),
     matched_pages_limit: int = Query(5, ge=1, le=20),
+    highlight_fragment_size: int = Query(180, ge=80, le=500),
+    highlight_fragments: int = Query(3, ge=1, le=5),
 ) -> dict[str, Any]:
     client = opensearch_client()
     ensure_index(client, OPENSEARCH_INDEX)
+    query_text = (q or "").strip()
+    mode = "search" if query_text else "list"
+    page_size, page_offset, current_page = _resolve_pagination(
+        limit=limit,
+        offset=offset,
+        page=page,
+        per_page=per_page,
+    )
+    default_sort = "-score" if mode == "search" else "-reg_date"
+    sort_name, sort_clause = _resolve_sort(sort=sort, sort_by=sort_by, default=default_sort)
 
     filters = []
     if regulation_file_id is not None:
@@ -58,8 +74,11 @@ def search(
 
     effective_group_by = "file" if group_by == "document" else group_by
     body = {
-        "from": offset,
-        "size": limit,
+        "from": page_offset,
+        "size": page_size,
+        "sort": sort_clause,
+        "track_scores": True,
+        "track_total_hits": True,
         "_source": [
             "regulation_file_id",
             "regulation_id",
@@ -81,34 +100,7 @@ def search(
             "regulation_type_sigla_id",
             "text_source_kind",
         ],
-        "query": {
-            "bool": {
-                "must": [
-                    {
-                        "multi_match": {
-                            "query": q,
-                            "fields": [
-                                "text^4",
-                                "reg_title^3",
-                                "reg_description^2",
-                                "file_name",
-                            ],
-                            "operator": "and",
-                        }
-                    }
-                ],
-                "filter": filters,
-            }
-        },
-        "highlight": {
-            "pre_tags": ["<mark>"],
-            "post_tags": ["</mark>"],
-            "fields": {
-                "text": {"fragment_size": 180, "number_of_fragments": 3},
-                "reg_title": {"fragment_size": 120, "number_of_fragments": 1},
-                "reg_description": {"fragment_size": 180, "number_of_fragments": 2},
-            },
-        },
+        "query": _build_query(query_text, filters),
         "aggs": {
             "unique_regulations": {
                 "cardinality": {
@@ -124,6 +116,12 @@ def search(
             }
         },
     }
+    if mode == "search":
+        body["highlight"] = _highlight_config(
+            fragment_size=highlight_fragment_size,
+            fragments=highlight_fragments,
+            include_metadata_fields=True,
+        )
     if effective_group_by == "regulation":
         body["collapse"] = {
             "field": "regulation_id",
@@ -140,16 +138,15 @@ def search(
                     "char_count",
                     "word_count",
                 ],
-                "highlight": {
-                    "pre_tags": ["<mark>"],
-                    "post_tags": ["</mark>"],
-                    "fields": {
-                        "text": {"fragment_size": 180, "number_of_fragments": 3},
-                    },
-                },
                 "sort": [{"_score": "desc"}],
             },
         }
+        if mode == "search":
+            body["collapse"]["inner_hits"]["highlight"] = _highlight_config(
+                fragment_size=highlight_fragment_size,
+                fragments=highlight_fragments,
+                include_metadata_fields=False,
+            )
     elif effective_group_by == "file":
         body["collapse"] = {
             "field": "regulation_file_id",
@@ -157,43 +154,211 @@ def search(
                 "name": "matched_pages",
                 "size": matched_pages_limit,
                 "_source": ["page", "char_count", "word_count"],
-                "highlight": {
-                    "pre_tags": ["<mark>"],
-                    "post_tags": ["</mark>"],
-                    "fields": {
-                        "text": {"fragment_size": 180, "number_of_fragments": 3},
-                    },
-                },
                 "sort": [{"_score": "desc"}],
             },
         }
+        if mode == "search":
+            body["collapse"]["inner_hits"]["highlight"] = _highlight_config(
+                fragment_size=highlight_fragment_size,
+                fragments=highlight_fragments,
+                include_metadata_fields=False,
+            )
 
     response = client.search(index=OPENSEARCH_INDEX, body=body)
     hits = response.get("hits", {})
     aggregations = response.get("aggregations") or {}
     unique_regulations = aggregations.get("unique_regulations") or {}
     unique_files = aggregations.get("unique_files") or {}
+    total = (
+        int(unique_regulations.get("value") or 0)
+        if effective_group_by == "regulation"
+        else int(unique_files.get("value") or 0)
+        if effective_group_by == "file"
+        else _total_value(hits.get("total"))
+    )
+    results = [
+        _format_hit(
+            hit,
+            group_by=effective_group_by,
+            matched_pages_limit=matched_pages_limit,
+        )
+        for hit in hits.get("hits", [])
+    ]
+    pagination = _pagination_payload(
+        total=total,
+        page_size=page_size,
+        page_offset=page_offset,
+        current_page=current_page,
+        result_count=len(results),
+    )
     return {
-        "query": q,
+        "mode": mode,
+        "query": query_text or None,
         "group_by": effective_group_by,
-        "total": (
-            int(unique_regulations.get("value") or 0)
-            if effective_group_by == "regulation"
-            else int(unique_files.get("value") or 0)
-            if effective_group_by == "file"
-            else _total_value(hits.get("total"))
-        ),
+        "sort": sort_name,
+        "highlight_fragment_size": highlight_fragment_size,
+        "highlight_fragments": highlight_fragments,
+        "total": total,
         "total_page_matches": _total_value(hits.get("total")),
-        "limit": limit,
-        "offset": offset,
-        "results": [
-            _format_hit(
-                hit,
-                group_by=effective_group_by,
-                matched_pages_limit=matched_pages_limit,
-            )
-            for hit in hits.get("hits", [])
-        ],
+        "limit": page_size,
+        "offset": page_offset,
+        "per_page": page_size,
+        "current_page": current_page,
+        "last_page": pagination["last_page"],
+        "from": pagination["from"],
+        "to": pagination["to"],
+        "next_page": pagination["next_page"],
+        "prev_page": pagination["prev_page"],
+        "pagination": pagination,
+        "results": results,
+    }
+
+
+def _resolve_pagination(
+    *,
+    limit: int | None,
+    offset: int | None,
+    page: int | None,
+    per_page: int | None,
+) -> tuple[int, int, int]:
+    page_size = per_page or limit or 10
+    if page is not None:
+        return page_size, (page - 1) * page_size, page
+
+    page_offset = offset or 0
+    current_page = (page_offset // page_size) + 1
+    return page_size, page_offset, current_page
+
+
+def _build_query(query_text: str, filters: list[dict[str, Any]]) -> dict[str, Any]:
+    must: list[dict[str, Any]] = []
+    if query_text:
+        must.append({
+            "multi_match": {
+                "query": query_text,
+                "fields": [
+                    "text^4",
+                    "reg_title^3",
+                    "reg_description^2",
+                    "file_name",
+                ],
+                "operator": "and",
+            }
+        })
+
+    return {
+        "bool": {
+            "must": must or [{"match_all": {}}],
+            "filter": filters,
+        }
+    }
+
+
+def _highlight_config(
+    *,
+    fragment_size: int,
+    fragments: int,
+    include_metadata_fields: bool,
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "text": {
+            "fragment_size": fragment_size,
+            "number_of_fragments": fragments,
+        },
+    }
+    if include_metadata_fields:
+        fields["reg_title"] = {"fragment_size": 120, "number_of_fragments": 1}
+        fields["reg_description"] = {"fragment_size": 180, "number_of_fragments": 2}
+    return {
+        "pre_tags": ["<mark>"],
+        "post_tags": ["</mark>"],
+        "fields": fields,
+    }
+
+
+def _resolve_sort(
+    *,
+    sort: str | None,
+    sort_by: str | None,
+    default: str,
+) -> tuple[str, list[dict[str, Any]]]:
+    requested = (sort_by or sort or default).strip()
+    aliases = {
+        "relevance": "-score",
+        "score_desc": "-score",
+        "date": "-reg_date",
+        "date_desc": "-reg_date",
+        "date_asc": "reg_date",
+        "year_desc": "-reg_year",
+        "year_asc": "reg_year",
+        "num_desc": "-reg_num",
+        "num_asc": "reg_num",
+    }
+    requested = aliases.get(requested, requested)
+
+    direction = "asc"
+    field = requested
+    if requested.startswith("-"):
+        direction = "desc"
+        field = requested[1:]
+
+    allowed_fields = {
+        "score": "_score",
+        "_score": "_score",
+        "reg_date": "reg_date",
+        "reg_year": "reg_year",
+        "reg_num": "reg_num",
+    }
+    opensearch_field = allowed_fields.get(field)
+    if opensearch_field is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Unsupported sort. Use -score, score, -reg_date, reg_date, "
+                "-reg_year, reg_year, -reg_num or reg_num."
+            ),
+        )
+
+    canonical = f"-{field}" if direction == "desc" else field
+    primary = (
+        {"_score": {"order": direction}}
+        if opensearch_field == "_score"
+        else {opensearch_field: {"order": direction, "missing": "_last"}}
+    )
+    tie_breakers = [
+        {"_score": {"order": "desc"}},
+        {"reg_date": {"order": "desc", "missing": "_last"}},
+        {"regulation_id": {"order": "desc", "missing": "_last"}},
+        {"regulation_file_id": {"order": "desc", "missing": "_last"}},
+        {"page": {"order": "asc", "missing": "_last"}},
+    ]
+    sort_clause = [primary]
+    for tie_breaker in tie_breakers:
+        if tie_breaker not in sort_clause:
+            sort_clause.append(tie_breaker)
+    return canonical, sort_clause
+
+
+def _pagination_payload(
+    *,
+    total: int,
+    page_size: int,
+    page_offset: int,
+    current_page: int,
+    result_count: int,
+) -> dict[str, int | None]:
+    last_page = max(1, (total + page_size - 1) // page_size) if total else 1
+    from_item = page_offset + 1 if result_count else 0
+    to_item = page_offset + result_count if result_count else 0
+    return {
+        "total": total,
+        "per_page": page_size,
+        "current_page": current_page,
+        "last_page": last_page,
+        "from": from_item,
+        "to": to_item,
+        "next_page": current_page + 1 if current_page < last_page else None,
+        "prev_page": current_page - 1 if current_page > 1 else None,
     }
 
 
