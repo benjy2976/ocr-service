@@ -220,3 +220,49 @@ Arquitectura deseada a mediano plazo:
 5. fusion sobre PDF original
 
 El PDF final no debe alterarse visualmente.
+
+## Decision: separar el motor OCR del negocio (2026-09-03)
+
+Objetivo de negocio nuevo: llevar el OCR a un servicio reutilizable desde
+"muchas plataformas", no solo desde el modelo de negocio actual (cola de
+Normatividad). Sin login por ahora; no es prioridad.
+
+Diagnostico: `app/main.py` (API HTTP) ya no tenia ninguna referencia a
+Normatividad — la integracion vivia aislada en `app/worker.py` +
+`app/munis_client.py`, pero acoplada por **import in-process** del pipeline
+(no por HTTP). `app/search_api.py` / `search_indexer.py` si tienen el esquema
+acoplado a Normatividad (`regulation_id`, `reg_year`, etc.).
+
+Decision: plan de split en 3 repos nuevos, sin historia heredada —
+`ocr-core` (este repo, motor + API generica), `normatividad-ocr-adapter`
+(reemplaza `ocr-worker`, llama a `ocr-core` por HTTP), `ocr-search` (se va
+junto al adaptador por ahora, esquema Munis→Normatividad se generaliza
+despues si hace falta). Detalle completo en `arquitectura.md`.
+
+Terminologia: "Munis" se renombra a "Normatividad" en el repo del adaptador.
+
+Se confirmo que `ocr-worker` reservaba GPU sin usarla (el worker no activa
+`mask_stamps`/`mask_signatures`, unicos consumidores de CUDA en el
+pipeline) — se retira la reserva de GPU del futuro `normatividad-ocr-adapter`.
+
+Se diseño y aprobo el contrato `POST /jobs` (asincrono, evita timeouts en
+PDFs grandes) con dos modos de entrega de artefactos: destino explicito
+(`artifacts.<name>.path`, validado contra `OCR_ALLOWED_OUTPUT_ROOTS`,
+escritura atomica) o staging local con TTL + descarga HTTP reintentable
+(no de un solo uso, por robustez ante fallas de red). Principio aprobado: el
+motor solo escribe a filesystem montado, nunca implementa clientes de
+protocolo de almacenamiento (FTP, S3, etc.). Detalle en `api.md`.
+
+Implementado en esta sesion: `app/routes_ocr.py` (API publica) y
+`app/routes_review.py` (herramientas internas) separados de `app/main.py`;
+`app/jobs.py` y `app/text_artifact.py` nuevos. `app/ocr_pipeline.py`
+deliberadamente no se toco — sin tests de caracterizacion, partirlo ahora es
+alto riesgo (ver `arquitectura.md`, seccion Fase 1).
+
+Se evaluo adoptar la skill `gestionar-memoria-viva-proyecto` (memoria viva
+con preflight/validador/markdownlint obligatorios). Decision: no adoptar la
+ceremonia completa en esta etapa (no aporta valor todavia sin tests/CI
+basicos), pero si mantener documentacion de contexto liviana y consultable
+— este archivo, `arquitectura.md`, `entorno.md`, `modelo-datos.md`, `api.md`
+— actualizada cuando cierre una decision o un incremento, sin proceso
+obligatorio ni validador.

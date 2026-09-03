@@ -112,6 +112,78 @@ curl -X POST http://localhost:18010/ocr/file \
 
 Respuesta: misma estructura que `POST /ocr`.
 
+## POST /jobs
+
+Endpoint asincrono para procesar un PDF sin bloquear la peticion HTTP mientras
+dura el OCR. Reemplaza el patron de "esperar la respuesta completa" para
+documentos grandes, donde una llamada sincrona puede exceder timeouts.
+
+Principio de diseno: el motor **solo escribe a rutas de filesystem montado**
+(NFS, disco, cualquier mount dentro del contenedor). Nunca implementa
+clientes de protocolo de almacenamiento (FTP, S3, etc.) — eso es
+responsabilidad de quien monte el volumen.
+
+Body (JSON):
+```json
+{
+  "source": { "path": "/data/tmp/documento.pdf" },
+  "options": {
+    "mode": "searchable_cpu",
+    "lang": "spa",
+    "metadata": { "cualquier": "dato opaco del llamador" }
+  },
+  "artifacts": {
+    "pdf":  { "path": "/nfs-cache/2026/119170/abcd.pdf", "overwrite": false },
+    "text": { "path": "/nfs-cache/2026/119170/abcd.jsonl", "overwrite": false }
+  }
+}
+```
+
+Reglas:
+- `artifacts` acepta las claves `pdf` y `text` (ver `docs/modelo-datos.md` para
+  el schema del artefacto `text`). Al menos una es obligatoria.
+- Si `artifacts.<name>.path` viene presente, debe resolver dentro de una raiz
+  permitida por `OCR_ALLOWED_OUTPUT_ROOTS` (o `OCR_OUT_DIR` /
+  `OCR_SHARED_CACHE_DIR` por defecto). La escritura es atomica: temporal en el
+  mismo directorio del destino + `os.replace`.
+- Si `artifacts.<name>.path` viene ausente, el artefacto queda en staging
+  local con TTL (`OCR_JOB_STAGING_TTL_MIN`, default 15 min) y se descarga por
+  `GET /jobs/{job_id}/artifacts/{name}` — no es de un solo uso, se puede
+  reintentar dentro de la ventana de TTL.
+- `options.metadata` es un passthrough opaco: el motor no le da significado,
+  solo lo guarda dentro del artefacto `text`. Asi el motor no conoce ningun
+  dominio (Normatividad u otro).
+
+Respuesta (202 Accepted):
+```json
+{ "job_id": "3f9c1a...", "status": "queued" }
+```
+
+## GET /jobs/{job_id}
+
+```json
+{
+  "job_id": "3f9c1a...",
+  "status": "done",
+  "artifacts": {
+    "pdf":  { "written": true, "path": "/nfs-cache/2026/119170/abcd.pdf", "bytes": 123456, "staged": false },
+    "text": { "written": true, "path": "/nfs-cache/2026/119170/abcd.jsonl", "bytes": 4321, "staged": false, "stats": {"page_count": 3, "non_empty_pages": 2, "text_len": 44} }
+  },
+  "preflight": { "classification": "unsigned_no_text", "decision": "process", ... },
+  "error": null
+}
+```
+
+`status` es uno de: `queued`, `processing`, `done`, `blocked` (preflight
+detecto firma digital sin texto util, no se corrio OCR), `failed` (ver
+`error`).
+
+## GET /jobs/{job_id}/artifacts/{name}
+
+Descarga un artefacto en staging (solo aplica cuando la peticion original no
+trajo `artifacts.<name>.path`). 404 si el job no existe, el artefacto no esta
+listo, o vencio el TTL.
+
 ## Interfaces web internas
 
 ### GET /stamps/review
